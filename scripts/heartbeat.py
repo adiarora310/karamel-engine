@@ -87,11 +87,24 @@ def format_draft(register, topic, text, scores, when, verifies=()):
         asks = "\n".join(f"  {i}. {v}" for i, v in enumerate(verifies, 1))
         head = (f"⚠️ NOT READY TO POST, {len(verifies)} blank(s) to fill first:\n"
                 f"{asks}\n\n" + head)
-    tail = (f"(gate {scores})  reply with the check to post, pencil plus your edit, "
-            f"or cross to skip.  ✅ ✏️ ❌")
+    # Words, not symbols. This started as ✅ ✏️ ❌ from the Telegram era, where a
+    # reaction is one tap. On email somebody has to type it, and an emoji picker
+    # is a worse ask than a word. Both still parse; the instruction names the
+    # easy one.
+    #
+    # It lives here rather than in a setup document because this is where it is
+    # needed: at the moment of replying, months after anyone read the setup.
+    tail = (f"(gate {scores})\n\n"
+            f"Reply to this email with one word:\n"
+            f"  posted   you published it as written\n"
+            f"  skip     you binned it\n"
+            f"or  edited  followed by what you actually posted.\n"
+            f"The quoted text below is ignored, so leave it.")
     if verifies:
-        tail = (f"(gate {scores})  fill the blank(s) above, then send it back with "
-                f"the pencil so the posted text is recorded.  ✏️")
+        tail = (f"(gate {scores})\n\n"
+                f"Fill the blank(s) above first, then reply with\n"
+                f"  edited   followed by the finished text\n"
+                f"so the posted version is what gets recorded.")
     return head + f"Topic: {topic}\n\n{text}\n\n" + tail
 
 
@@ -255,7 +268,11 @@ def selftest():
 
     when = datetime(2026, 8, 10, 9, 30)
     m = format_draft("banger", "T", "the post", {"TAKE": 9}, when)
-    assert "the post" in m and "✅" in m and "T" in m, m
+    # The reply instruction is words rather than symbols: on email somebody has
+    # to type it, and an emoji picker is a worse ask than a word.
+    assert "the post" in m and "T" in m, m
+    assert "posted" in m and "skip" in m and "edited" in m, m
+    assert "✅" not in m, "emoji instruction is a Telegram-era leftover"
     assert "Aug 10" in m and "09:30" in m, m
     assert "NOT READY" not in m, "a clean draft must not carry the warning"
 
@@ -267,7 +284,8 @@ def selftest():
     assert "2 blank(s)" in v and "seat count" in v and "the date" in v, v
     # And it must not offer the one-tap approve that would post it verbatim.
     assert "✅" not in v, "a draft with blanks must not be one-tap postable"
-    assert "✏️" in v, v
+    assert "edited" in v, v
+    assert "✏️" not in v, "emoji instruction is a Telegram-era leftover"
 
     print("heartbeat selftest: all assertions passed")
 

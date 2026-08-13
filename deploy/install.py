@@ -68,6 +68,9 @@ READING_AGENTS = {
 }
 
 KEEPALIVE = {
+    # Always up, so "is it working" is a bookmark rather than a command
+    # somebody has to remember. Localhost only, read-only, costs nothing idle.
+    "dashboard": ("dashboard.py", [], None),
     # poller_daemon does one long-poll pass and loops forever, so launchd keeps
     # it alive rather than scheduling it. Note it imports poller once and never
     # re-imports: a code change needs `launchctl kickstart -k`, not a git pull.

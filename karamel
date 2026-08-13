@@ -6,6 +6,8 @@ keep. It never posts anything.
     ./karamel start     run it from now on
     ./karamel draft     make one right now and show me
     ./karamel status    is it working
+    ./karamel dashboard a page showing what it has done and what is next
+    ./karamel token     the password for that page, when it is not local
     ./karamel doctor    something is wrong, tell me what and how to fix it
     ./karamel logs      what went wrong, in the components' own words
     ./karamel update    get the latest version
@@ -343,7 +345,7 @@ def cmd_start():
         return rc
     agents = Path.home() / "Library" / "LaunchAgents"
     loaded = 0
-    for label in (("heartbeat", "reflector", "doctor", "updater")
+    for label in (("heartbeat", "reflector", "doctor", "updater", "dashboard")
                   + _reply_agents() + _reading_agents()):
         p = agents / f"com.karamel.{label}.plist"
         if not p.exists():
@@ -354,6 +356,7 @@ def cmd_start():
             say(f"  started {label}")
     say()
     say(f"{loaded} running. Drafts will arrive twice a day.")
+    say("Status page: http://127.0.0.1:8765")
     say("Stop anytime with: ./karamel stop")
     return 0
 
@@ -443,6 +446,63 @@ def cmd_status():
     r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
     running = [l.split()[-1] for l in r.stdout.splitlines() if is_agent_line(l)]
     say(f"running    {', '.join(running) if running else 'nothing'}")
+    return 0
+
+
+def cmd_dashboard():
+    """The page that answers 'is this alive' without anyone learning a command."""
+    import webbrowser
+
+    port = "8765"
+    if "--port" in sys.argv:
+        i = sys.argv.index("--port")
+        if i + 1 < len(sys.argv):
+            port = sys.argv[i + 1]
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    args = [sys.executable, str(ROOT / "scripts" / "dashboard.py"),
+            "--port", port] + [a for a in sys.argv[2:] if a != "--port"]
+    try:
+        tok = json.loads((CONFIG / "dashboard.json").read_text()).get("token", "")
+    except (OSError, json.JSONDecodeError):
+        tok = ""
+    url = f"http://127.0.0.1:{port}" + (f"/?k={tok}" if tok else "")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    return subprocess.run(
+        args, env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+                   "KARAMEL_HOME": str(ROOT)},
+    ).returncode
+
+
+def cmd_token():
+    """Mint the dashboard token, or print the existing one.
+
+    Separate command because the page refuses to listen anywhere but loopback
+    without it, and the refusal names this rather than making somebody compose
+    a secrets.token_urlsafe call from an error message."""
+    import secrets
+
+    path = CONFIG / "dashboard.json"
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    if path.exists() and "--new" not in sys.argv:
+        try:
+            tok = json.loads(path.read_text()).get("token", "")
+        except (json.JSONDecodeError, OSError):
+            tok = ""
+        if tok:
+            say(f"token   {tok}")
+            say(f"link    http://127.0.0.1:8765/?k={tok}")
+            say("\nThat link is the password. Pass --new to replace it.")
+            return 0
+    tok = secrets.token_urlsafe(32)
+    path.write_text(json.dumps({"token": tok}, indent=2) + "\n")
+    os.chmod(path, 0o600)
+    say(f"token   {tok}")
+    say(f"link    http://127.0.0.1:8765/?k={tok}")
+    say(f"\nWritten to {path}, readable only by you.")
+    say("Anyone with that link can read your drafts. It is the password.")
     return 0
 
 
@@ -538,7 +598,17 @@ COMMANDS = {
     "setup": cmd_setup, "draft": cmd_draft, "start": cmd_start,
     "stop": cmd_stop, "status": cmd_status, "voice": cmd_voice,
     "doctor": cmd_doctor, "logs": cmd_logs, "update": cmd_update,
+    "dashboard": cmd_dashboard, "web": cmd_dashboard, "token": cmd_token,
 }
+
+# Every function named cmd_* has to be reachable. Two were written, wired into
+# nothing, and printed the usage text instead: the table is edited by hand and a
+# missed entry looks exactly like a typo at the prompt.
+_unreachable = sorted(
+    n[4:] for n, v in list(globals().items())
+    if n.startswith("cmd_") and callable(v) and v not in COMMANDS.values()
+)
+assert not _unreachable, f"cmd_ functions missing from COMMANDS: {_unreachable}"
 
 
 def main():
