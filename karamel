@@ -1,0 +1,554 @@
+#!/usr/bin/env python3
+"""Karamel. Drafts posts in your voice, sends them to you, learns from what you
+keep. It never posts anything.
+
+    ./karamel setup     answer a few questions, once
+    ./karamel start     run it from now on
+    ./karamel draft     make one right now and show me
+    ./karamel status    is it working
+    ./karamel doctor    something is wrong, tell me what and how to fix it
+    ./karamel logs      what went wrong, in the components' own words
+    ./karamel update    get the latest version
+    ./karamel stop      stop everything
+    ./karamel migrate   move ~/.config/cowork to the new name (optional)
+
+Setup used to be five commands with a PYTHONPATH prefix, hand-edited JSON, a
+chmod, and an app-specific password. Every one of those is a place to give up,
+and none of them is the product.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT / "scripts"))
+os.environ.setdefault("KARAMEL_HOME", str(ROOT))
+
+# Resolved, not assumed. shared._config_dir() prefers ~/.config/karamel but
+# falls back to the older ~/.config/cowork when that is the populated one, which
+# is the case on the host. Hardcoding the new name here meant setup wrote
+# telegram.json to a directory nothing read, and ./karamel stop wrote its halt
+# flag where no component would ever see it.
+from shared import CONFIG_DIR as CONFIG  # noqa: E402
+
+
+# ----------------------------------------------------------------- utilities
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+def ask(prompt, default=None):
+    suffix = f" [{default}]" if default else ""
+    try:
+        got = input(f"{prompt}{suffix}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        say("\ncancelled")
+        sys.exit(1)
+    return got or (default or "")
+
+
+def yes(prompt, default=True):
+    d = "Y/n" if default else "y/N"
+    got = ask(f"{prompt} ({d})").lower()
+    if not got:
+        return default
+    return got.startswith("y")
+
+
+def step(n, total, title):
+    say()
+    say(f"[{n}/{total}] {title}")
+    say("-" * (len(title) + 8))
+
+
+# --------------------------------------------------------------- setup steps
+
+def check_llm():
+    """The one thing everything downstream needs: a working model key.
+
+    Checked first, and with a real call rather than a file-exists test, because
+    every generating component dies on this and dies with a message nobody
+    connects back to a key. Note whose key it is: Karamel's, shipped with the
+    package. Nobody installs a CLI or signs into anything to run this."""
+    try:
+        import llm
+    except ImportError as e:                       # pragma: no cover
+        say(f"  Cannot load the model client: {e}")
+        return False
+    try:
+        cfg = llm.load_config()
+    except llm.LLMError as e:
+        say(f"  {e}")
+        return False
+    say(f"  Model {cfg['model']}, key ...{str(cfg['api_key'])[-6:]}. Checking it.")
+    try:
+        llm.complete("Reply with exactly: ok", tenant="setup",
+                     label="setup-check", cfg=cfg, max_tokens=1000)
+    except llm.LLMError as e:
+        say(f"  That key did not work: {e}")
+        return False
+    say("  Works.")
+    return True
+
+
+def pick_voice_card(owner):
+    """A card shipped with the package, or one built from their writing here."""
+    cards = sorted((ROOT / "data" / "voice_cards").glob("*.md"))
+    if cards:
+        say(f"  Found a voice card already prepared for you: {cards[0].name}")
+        if yes("  Use it?"):
+            return cards[0].relative_to(ROOT).as_posix()
+
+    say("  A voice card is what makes drafts sound like you rather than like a")
+    say("  model. It is built from your own writing.")
+    say()
+    say("  Put 8 or more of your posts, emails or paragraphs in a text file,")
+    say("  one per line or separated by blank lines. Most characteristic, not")
+    say("  most successful.")
+    path = ask("  Path to that file (or blank to skip for now)")
+    if not path:
+        say("  Skipping. Drafts will be generic until you run: ./karamel voice")
+        return None
+    src = Path(path).expanduser()
+    if not src.exists():
+        say(f"  No file at {src}. Skipping; run ./karamel voice later.")
+        return None
+    return build_voice_card(owner, src)
+
+
+def build_voice_card(owner, samples_file):
+    import re
+
+    import voice_card_generator as vcg
+
+    raw = samples_file.read_text()
+    chunks = [c.strip() for c in re.split(r"\n\s*\n|\n(?=[-*] )", raw) if c.strip()]
+    if len(chunks) < 6:
+        chunks = [c.strip() for c in raw.splitlines() if c.strip()]
+    say(f"  Read {len(chunks)} samples.")
+
+    name = ask("  Your name, as you would be introduced", owner)
+    one = ask("  One line: who are you? (not a job title)")
+    can = ask("  Things you can speak to from experience (comma separated)")
+    cannot = ask("  Things you must NEVER be made to claim (comma separated)")
+    nos = ask("  Anything you will not post about, ever (comma separated)")
+
+    intake = {
+        "name": name,
+        "handle": ask("  Your X handle", f"@{owner}"),
+        "one_liner": one,
+        "identity": {
+            "can_claim": [s.strip() for s in can.split(",") if s.strip()],
+            "cannot_claim": [s.strip() for s in cannot.split(",") if s.strip()],
+        },
+        "lanes": [], "registers": "", "obsessions": [],
+        "sounds_like": [], "not_like": [],
+        "hard_no": [s.strip() for s in nos.split(",") if s.strip()],
+        "tells": [],
+        "samples": chunks,
+    }
+    intake_path = ROOT / "data" / "intakes" / f"{owner}.json"
+    intake_path.parent.mkdir(parents=True, exist_ok=True)
+    intake_path.write_text(json.dumps(intake, indent=2) + "\n")
+
+    say("  Building your voice card. This takes a minute.")
+    rc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "voice_card_generator.py"),
+         "--intake", str(intake_path)],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts")},
+    ).returncode
+    if rc != 0:
+        say("  Voice card generation failed. Run ./karamel voice to retry.")
+        return None
+    out = ROOT / "data" / "voice_cards" / f"{vcg.slugify(name)}.md"
+    return out.relative_to(ROOT).as_posix() if out.exists() else None
+
+
+def setup_telegram():
+    """Telegram, with the chat id captured rather than looked up by hand.
+
+    Chosen as the default over email because it needs no app-specific password,
+    no IMAP host, and no chmod. Four taps in an app they already have."""
+    from urllib import request
+
+    say("  Telegram is the quickest: no passwords, works on your phone.")
+    say()
+    say("  1. Open Telegram and message @BotFather")
+    say("  2. Send /newbot and follow the two prompts")
+    say("  3. It replies with a token. Paste it here.")
+    say()
+    token = ask("  Bot token (or blank to choose email instead)")
+    if not token:
+        return None
+
+    say()
+    say("  Now message YOUR bot. Send it anything, the word hello is fine.")
+    ask("  Press enter once you have sent it")
+
+    try:
+        with request.urlopen(
+            f"https://api.telegram.org/bot{token}/getUpdates", timeout=20
+        ) as r:
+            body = json.loads(r.read())
+    except Exception as e:
+        say(f"  Could not reach Telegram: {e}")
+        return None
+    results = body.get("result") or []
+    if not results:
+        say("  No message seen yet. Send your bot a message and run setup again.")
+        return None
+    chat_id = results[-1].get("message", {}).get("chat", {}).get("id")
+    if not chat_id:
+        say("  Got a response but no chat id in it. Try email instead.")
+        return None
+
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    cfg = CONFIG / "telegram.json"
+    cfg.write_text(json.dumps({"bot_token": token, "chat_id": str(chat_id)}, indent=2))
+    os.chmod(cfg, 0o600)
+    say(f"  Connected. Sending a test message to chat {chat_id}.")
+    try:
+        from shared import send_message
+        send_message("Karamel is connected. Your drafts will arrive here.")
+        say("  Check your phone. If you saw it, that is delivery done.")
+    except Exception as e:
+        say(f"  Saved, but the test send failed: {e}")
+    return {"type": "telegram", "chat_id": str(chat_id)}
+
+
+def setup_email():
+    say("  Email needs an app-specific password from your provider.")
+    say("  For Gmail: enable 2FA, then Account > App passwords.")
+    say()
+    addr = ask("  Your email address (where drafts go)")
+    user = ask("  Sending account username", addr)
+    pw = ask("  App-specific password")
+    host = ask("  SMTP host", "smtp.gmail.com")
+    if not (addr and user and pw):
+        say("  Incomplete, skipping email.")
+        return None
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    cfg = CONFIG / "email.json"
+    cfg.write_text(json.dumps({
+        "smtp_host": host, "smtp_port": 587,
+        "imap_host": host.replace("smtp.", "imap.", 1), "imap_port": 993,
+        "username": user, "password": pw,
+        "from_address": user, "from_name": "Karamel",
+    }, indent=2))
+    os.chmod(cfg, 0o600)
+    say("  Saved. Sending a test message.")
+    try:
+        import channels
+
+        class T:
+            id, channel = "setup", {"type": "email", "address": addr}
+        channels.send_email(T(), "Karamel is connected. Drafts will arrive here.",
+                            subject="[Karamel] connected")
+        say(f"  Sent to {addr}. Check your inbox.")
+    except Exception as e:
+        say(f"  Saved, but the test send failed: {e}")
+        say("  Fix the details and run ./karamel setup again.")
+    return {"type": "email", "address": addr}
+
+
+# --------------------------------------------------------------- subcommands
+
+def cmd_setup():
+    import tenants
+
+    say(__doc__.strip().splitlines()[0])
+    say()
+    say("This asks a few questions and then runs itself. Nothing is posted")
+    say("anywhere, ever: it drafts, you decide.")
+
+    total = 4
+    step(1, total, "Checking what is already here")
+    if not check_llm():
+        return 1
+
+    step(2, total, "Who you are")
+    default_owner = os.environ.get("USER", "me").lower()
+    owner = ask("  A short id for you, lowercase, no spaces", default_owner)
+    owner = "".join(c for c in owner.lower() if c.isalnum() or c == "-") or "me"
+    name = ask("  Your full name", owner.title())
+
+    step(3, total, "Your voice")
+    card = pick_voice_card(owner)
+
+    step(4, total, "Where drafts should reach you")
+    channel = setup_telegram()
+    if channel is None:
+        channel = setup_email() if yes("  Use email instead?") else {"type": "none"}
+
+    os.environ["KARAMEL_OWNER"] = owner
+    import importlib
+    importlib.reload(tenants)
+
+    existing = tenants.load_tenant(owner)
+    data = existing.to_dict() if existing else {"id": owner}
+    data.update({"id": owner, "name": name, "channel": channel, "enabled": True})
+    if card:
+        data["voice_card"] = card
+    tenants.save_tenant(tenants.Tenant(data))
+
+    (ROOT / ".karamel").write_text(json.dumps({"owner": owner}, indent=2) + "\n")
+
+    say()
+    say("=" * 60)
+    say("Setup done.")
+    say(f"  you        {name} ({owner})")
+    say(f"  voice card {card or 'not set, run ./karamel voice'}")
+    say(f"  delivery   {channel.get('type')}")
+    say()
+    say("See one draft right now:      ./karamel draft")
+    say("Then run it from now on:      ./karamel start")
+    return 0
+
+
+def _owner():
+    f = ROOT / ".karamel"
+    if f.exists():
+        try:
+            return json.loads(f.read_text()).get("owner")
+        except (json.JSONDecodeError, OSError):
+            pass
+    return os.environ.get("KARAMEL_OWNER") or "adi"
+
+
+def cmd_draft():
+    owner = _owner()
+    os.environ["KARAMEL_OWNER"] = owner
+    say(f"Drafting one post for {owner}. This takes a minute or two.")
+    say()
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "heartbeat.py"),
+         "--tenant", owner, "--print", "--force", "--limit", "1"],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+             "KARAMEL_HOME": str(ROOT)},
+    ).returncode
+
+
+def cmd_start():
+    owner = _owner()
+    rc = subprocess.run(
+        [sys.executable, str(ROOT / "deploy" / "install.py"), "--owner", owner],
+    ).returncode
+    if rc != 0:
+        return rc
+    agents = Path.home() / "Library" / "LaunchAgents"
+    loaded = 0
+    for label in (("heartbeat", "reflector", "doctor", "updater")
+                  + _reply_agents() + _reading_agents()):
+        p = agents / f"com.karamel.{label}.plist"
+        if not p.exists():
+            continue
+        r = subprocess.run(["launchctl", "load", str(p)], capture_output=True)
+        if r.returncode == 0:
+            loaded += 1
+            say(f"  started {label}")
+    say()
+    say(f"{loaded} running. Drafts will arrive twice a day.")
+    say("Stop anytime with: ./karamel stop")
+    return 0
+
+
+def _reading_agents():
+    """The X-touching agents, and only when this tenant may actually use them.
+
+    Gated on effective_reply_mining, which is the AND of the tenant's config and
+    the allowlist module. Both have to say yes, and the module is not in the
+    distribution, so a fresh install starts nothing that touches X no matter
+    what its config says.
+
+    Chrome is included because without it the listener's connect_over_cdp fails
+    and set_halt() fires, which reads like platform enforcement rather than a
+    browser that is not running."""
+    import tenants
+
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    t = tenants.load_tenant(_owner())
+    if t is None:
+        return ()
+    allowed, why = t.effective_reply_mining()
+    if not allowed:
+        say(f"  reading half stays off: {why}")
+        return ()
+    return (f"chrome-{t.id}", "listener", "evaluator", "drafter", "notifier")
+
+
+def _reply_agents():
+    """Only the reader for the channel this person actually uses.
+
+    Starting both is not harmless. poller_daemon loops forever and logs to
+    stderr every five seconds, so with no telegram.json an email tenant gets an
+    endless error stream, and the watchdog dutifully reports it on day one. The
+    first thing they would ever hear from this software would be a false alarm
+    about a component they do not use."""
+    import tenants
+
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    t = tenants.load_tenant(_owner())
+    kind = ((t.channel if t else None) or {}).get("type", "none")
+    if kind == "telegram":
+        return ("poller",)
+    if kind == "email":
+        return ("inbox",)
+    return ()
+
+
+def cmd_stop():
+    from shared import agent_plists
+
+    n = 0
+    for p in agent_plists():
+        if subprocess.run(["launchctl", "unload", str(p)],
+                          capture_output=True).returncode == 0:
+            n += 1
+    CONFIG.mkdir(parents=True, exist_ok=True)
+    (CONFIG / "pause_state.json").write_text(
+        json.dumps({"halt": True, "halt_reason": "stopped from ./karamel stop",
+                    "halt_set_ts": None}, indent=2))
+    say(f"Stopped {n} agent(s), and set halt so nothing runs even if reloaded.")
+    say("Start again with: ./karamel start")
+    return 0
+
+
+def cmd_status():
+    import tenants
+
+    if not (ROOT / ".karamel").exists():
+        say("Not set up yet on this machine.")
+        say()
+        say("  ./karamel setup")
+        return 1
+    owner = _owner()
+    os.environ["KARAMEL_OWNER"] = owner
+    t = tenants.load_tenant(owner)
+    say(f"you        {t.name if t else owner} ({owner})")
+    if t:
+        card = t.voice_card_path
+        say(f"voice card {'ok' if card.exists() else 'MISSING'}  {card.name}")
+        say(f"delivery   {t.channel.get('type')}")
+        drafts = t.original_drafts_path
+        n = len(drafts.read_text().splitlines()) if drafts.exists() else 0
+        say(f"drafts     {n} so far")
+    from shared import is_agent_line
+
+    r = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    running = [l.split()[-1] for l in r.stdout.splitlines() if is_agent_line(l)]
+    say(f"running    {', '.join(running) if running else 'nothing'}")
+    return 0
+
+
+def cmd_doctor():
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "doctor.py")] + sys.argv[2:],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+             "KARAMEL_HOME": str(ROOT)},
+    ).returncode
+
+
+def cmd_logs():
+    """The last thing each component said, newest first.
+
+    Errors, not chatter. Someone running this because something is wrong does
+    not want the successful runs, and .log files are almost entirely those."""
+    errs = sorted(CONFIG.glob("*.err"), key=lambda p: p.stat().st_mtime,
+                  reverse=True)
+    errs = [p for p in errs if p.stat().st_size > 0]
+    if not errs:
+        say(f"No errors logged in {CONFIG}.")
+        return 0
+    n = 25
+    for p in errs:
+        age_m = (time.time() - p.stat().st_mtime) / 60
+        when = f"{age_m:.0f}m ago" if age_m < 90 else f"{age_m / 60:.0f}h ago"
+        say(f"\n=== {p.name}  ({when}, {p.stat().st_size} bytes) ===")
+        lines = p.read_text(errors="replace").splitlines()
+        for line in lines[-n:]:
+            say(f"  {line[:220]}")
+    return 0
+
+
+def cmd_update():
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "updater.py"),
+         "--owner", _owner()] + sys.argv[2:],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+             "KARAMEL_HOME": str(ROOT)},
+    ).returncode
+
+
+def cmd_voice():
+    owner = _owner()
+    path = ask("Path to a file with 8+ samples of your writing")
+    src = Path(path).expanduser()
+    if not src.exists():
+        say(f"No file at {src}")
+        return 1
+    card = build_voice_card(owner, src)
+    if not card:
+        return 1
+    import tenants
+    os.environ["KARAMEL_OWNER"] = owner
+    t = tenants.load_tenant(owner)
+    d = t.to_dict()
+    d["voice_card"] = card
+    tenants.save_tenant(tenants.Tenant(d))
+    say(f"Voice card set: {card}")
+    return 0
+
+
+def cmd_migrate():
+    """Move ~/.config/cowork to ~/.config/karamel, deliberately.
+
+    Never automatic. That directory holds live credentials, pause state and the
+    daily counters of a running system, and silently moving it during a rename
+    is how a working install stops working for the sake of a directory name."""
+    old = Path.home() / ".config" / "cowork"
+    new = Path.home() / ".config" / "karamel"
+    if not old.exists():
+        say(f"Nothing to migrate: {old} does not exist.")
+        return 0
+    if new.exists():
+        say(f"{new} already exists. Merge by hand, or remove one.")
+        return 1
+    say(f"About to move {old}")
+    say(f"                 -> {new}")
+    say()
+    say("This directory holds your credentials, pause state and daily counters.")
+    if not yes("Move it?", default=False):
+        say("Left alone. The old name keeps working indefinitely.")
+        return 0
+    old.rename(new)
+    say(f"Moved. Stop and start anything running: ./karamel stop && ./karamel start")
+    return 0
+
+
+COMMANDS = {
+    "migrate": cmd_migrate,
+    "setup": cmd_setup, "draft": cmd_draft, "start": cmd_start,
+    "stop": cmd_stop, "status": cmd_status, "voice": cmd_voice,
+    "doctor": cmd_doctor, "logs": cmd_logs, "update": cmd_update,
+}
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    fn = COMMANDS.get(cmd)
+    if fn is None:
+        say(__doc__.strip())
+        return 0 if not cmd else 2
+    return fn()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

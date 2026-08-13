@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""Karamel heartbeat: the daily original-content cycle. Cycle 4 of the pilot.
+
+Closes the user-zero loop. Each run: pull topics, draft each through the gated
+maker (gen.py), keep only drafts that clear the critic gate, deliver them to
+Adi's approval channel. He posts, edits, or skips; his edits feed the reflector
+so the voice card compounds. Original-first (safety.py): no scraping, no replies
+here, nothing reaches an audience without Adi.
+
+This is the Automation block of the Karpathy five, the heartbeat. On the host it
+is scheduled by launchd; each run resumes from the topic queue and the draft log,
+never from zero.
+
+Delivery goes to the tenant's configured channel (channels.py), not to whatever
+this machine happens to have creds for. Records to the tenant's
+original_drafts.jsonl using the same status vocabulary the reflector reads
+(pending / posted_clean / posted_edited / skipped), so the learn loop closes
+without touching the live reply pipeline in drafts.jsonl.
+
+This is the entry point, so this is where a tenant is resolved. gen.py and
+critic.py stay plain libraries taking a name and paths: pushing the registry
+down into them would make every unit test need a tenant on disk.
+
+CLI:
+  --tenant ID   whose voice, whose channel, whose files (default adi)
+  --all         run every enabled tenant in turn
+  --limit N     max drafts this run per tenant (default: the tenant's setting)
+  --force       run even if paused
+  --print       dry run: generate and show delivery, do not send or record
+  --selftest    pure-logic tests, no claude, no delivery
+"""
+import sys
+import time
+
+import channels
+import critic
+import gen
+import tenants
+from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
+
+# Seeds are evergreen and voice-neutral by design: they exist so the loop always
+# has something to chew on, not to be good posts. A tenant with real topics in
+# their queue never reaches them.
+
+# Evergreen dogfood seeds, used when the queue is empty so the loop always runs.
+LEGACY_SEED_TOPICS = [
+    {"topic": "Dieter Rams 'less but better' as an operating principle for founders",
+     "register": "analytical"},
+    {"topic": "why most founder LinkedIn posts read like a press release",
+     "register": "analytical"},
+    {"topic": "the Lakers roster math as a lesson in constraint",
+     "register": "banger"},
+]
+
+
+def next_topics(limit, topic_queue, original_drafts, seeds=()):
+    """Topics to draft this run: queue entries first, then seeds, skipping any
+    topic already drafted (dedup against the draft log so it does not repeat).
+
+    Both paths are arguments rather than module constants: dedup must be against
+    THIS tenant's history. Reading a shared draft log would let one tenant's
+    drafted topic silently suppress another's."""
+    done = {(r.get("topic") or "").strip().lower() for r in read_jsonl(original_drafts)}
+    pool = (read_jsonl(topic_queue) or []) + list(seeds)
+    out, seen = [], set()
+    for t in pool:
+        topic = (t.get("topic") or "").strip()
+        key = topic.lower()
+        if not topic or key in done or key in seen:
+            continue
+        seen.add(key)
+        out.append({"topic": topic, "register": t.get("register", "analytical")})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def format_draft(register, topic, text, scores, when, verifies=()):
+    """`when` is the tenant's local time, not the server's. One Mac serves
+    people in several zones, and a draft stamped 6am for someone in London is
+    a draft they will not trust."""
+    head = f"[KARAMEL DRAFT, {register}, {when.strftime('%a %b %d %H:%M %Z')}]\n"
+    if verifies:
+        # First line, before the draft. A slot buried mid-paragraph gets posted
+        # verbatim by someone skimming on a phone, and "[VERIFY: ...]" in a live
+        # post is worse than the draft never having been sent.
+        asks = "\n".join(f"  {i}. {v}" for i, v in enumerate(verifies, 1))
+        head = (f"⚠️ NOT READY TO POST, {len(verifies)} blank(s) to fill first:\n"
+                f"{asks}\n\n" + head)
+    tail = (f"(gate {scores})  reply with the check to post, pencil plus your edit, "
+            f"or cross to skip.  ✅ ✏️ ❌")
+    if verifies:
+        tail = (f"(gate {scores})  fill the blank(s) above, then send it back with "
+                f"the pencil so the posted text is recorded.  ✏️")
+    return head + f"Topic: {topic}\n\n{text}\n\n" + tail
+
+
+def run_tenant(tenant, limit=None, force=False, dry=False):
+    """One tenant's daily cycle. Returns the number of drafts delivered."""
+    if not tenant.enabled:
+        print(f"[{tenant.id}] disabled, skipping")
+        return 0
+    if is_paused() and not force:
+        print(f"[{tenant.id}] paused or halted, skipping")
+        return 0
+
+    card = tenant.voice_card_path
+    if not card.exists():
+        print(f"[{tenant.id}] no voice card at {card}, skipping", file=sys.stderr)
+        return 0
+    voice = card.read_text()
+
+    # Seeds are the tenant's own, or the legacy list for the legacy owner only.
+    # A new tenant with an empty queue and no seeds draws a blank rather than
+    # inheriting someone else's subjects.
+    seeds = tenant.seed_topics or (LEGACY_SEED_TOPICS if tenant.is_legacy else [])
+    n = tenant.originals_per_day if limit is None else limit
+    topics = next_topics(n, tenant.topic_queue_path, tenant.original_drafts_path,
+                         seeds=seeds)
+    if not topics:
+        print(f"[{tenant.id}] no fresh topics "
+              f"(queue empty, {len(seeds)} seed(s) configured)")
+        return 0
+
+    delivered = 0
+    for t in topics:
+        r = gen.generate_gated(
+            voice, t["topic"], register=t["register"], max_rounds=2,
+            author=tenant.name,
+            tenant=tenant.id,
+            generated_path=tenant.generated_path,
+            critiques_path=tenant.critiques_path,
+            allow_em_dash=tenant.allow_em_dash,
+            log=True,
+        )
+        if r["verdict"] != "PASS":
+            # A bare "SKIP (gate FAIL)" is a dead end. The journey holds the
+            # scores, the reason and the one fix for every round, and heartbeat
+            # was throwing all of it away, which is exactly the information
+            # needed to tune a card that is failing its own gate.
+            print(f"[{tenant.id}] SKIP (gate {r['verdict']}) after "
+                  f"{r.get('rounds', 0)} round(s): {t['topic']}")
+            for j in r.get("journey", []):
+                print(f"    round {j['round']}: {j['verdict']} {j.get('scores', {})}")
+                if j.get("why"):
+                    print(f"      why: {j['why']}")
+                if j.get("fix"):
+                    print(f"      fix: {j['fix']}")
+                print(f"      draft: {(j.get('draft') or '')[:200]}")
+            continue
+        verifies = critic.verify_slots(r["final"])
+        # Minted before the send, not after: it goes in the email subject, and a
+        # reply keeps the subject, which is how an inbound path will match it
+        # back to this row.
+        draft_id = int(time.time() * 1000)
+        msg = format_draft(
+            t["register"], t["topic"], r["final"], r.get("scores", {}),
+            tenant.now(), verifies=verifies,
+        )
+        flag = "ACTION NEEDED, blanks to fill" if verifies else "draft"
+        subject = f"[Karamel] #{draft_id} · {flag} · {t['topic'][:60]}"
+        mid = channels.send(tenant, msg, dry=dry, subject=subject)
+        delivered += 1
+        if dry:
+            continue
+        append_jsonl(tenant.original_drafts_path, {
+            "draft_id": draft_id,
+            "tenant": tenant.id,
+            "kind": "original",
+            "topic": t["topic"],
+            "register": t["register"],
+            "draft_text": r["final"],
+            "scores": r.get("scores", {}),
+            "rounds": r.get("rounds", 0),
+            "status": "pending",
+            # Non-empty means the text is NOT postable as-is. The approval step
+            # is what resolves a slot, which is the whole reason the maker is
+            # allowed to leave one instead of inventing a number.
+            "needs_verify": verifies,
+            # Kept under the legacy key so the reflector and poller, which both
+            # match on it, keep working. It is a channel message id now, not
+            # necessarily Telegram's.
+            "telegram_msg_id": mid,
+            "drafted_at": now_iso(),
+        })
+    print(f"[{tenant.id}] done: {delivered} draft(s) delivered")
+    return delivered
+
+
+def run(tenant_ids, limit=None, force=False, dry=False):
+    """Run the cycle for each named tenant. One tenant's failure does not stop
+    the others: a missing voice card or a dead channel is that customer's
+    problem, not an outage for everyone on the box."""
+    total, failed = 0, []
+    for tid in tenant_ids:
+        t = tenants.load_tenant(tid)
+        if t is None:
+            print(f"no such tenant: {tid}", file=sys.stderr)
+            failed.append(tid)
+            continue
+        try:
+            total += run_tenant(t, limit=limit, force=force, dry=dry)
+        except Exception as e:
+            print(f"[{tid}] FAILED: {type(e).__name__}: {e}", file=sys.stderr)
+            failed.append(tid)
+    print(f"total: {total} draft(s) across {len(tenant_ids) - len(failed)} tenant(s)")
+    if failed:
+        print(f"failed: {', '.join(failed)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def selftest():
+    global read_jsonl
+    import pathlib
+    from datetime import datetime
+    from pathlib import Path
+
+    _real = read_jsonl
+    QUEUE_A, DRAFTS_A = Path("/q/a.jsonl"), Path("/d/a.jsonl")
+    QUEUE_B, DRAFTS_B = Path("/q/b.jsonl"), Path("/d/b.jsonl")
+
+    def fake_read(path):
+        if path == DRAFTS_A:
+            return [{"topic": "old topic"}]
+        if path == QUEUE_A:
+            return [{"topic": "old topic", "register": "analytical"},
+                    {"topic": "fresh topic", "register": "banger"}]
+        if path == DRAFTS_B:
+            return []
+        if path == QUEUE_B:
+            return [{"topic": "old topic", "register": "analytical"}]
+        return []
+
+    read_jsonl = fake_read
+    try:
+        SEEDS = [{"topic": "a seed topic", "register": "analytical"}]
+        keys = [t["topic"] for t in next_topics(5, QUEUE_A, DRAFTS_A, SEEDS)]
+        assert "old topic" not in keys, keys          # deduped against the draft log
+        assert "fresh topic" in keys, keys
+        assert next_topics(5, QUEUE_A, DRAFTS_A, SEEDS)[0]["register"] == "banger"
+        assert len(next_topics(1, QUEUE_A, DRAFTS_A, SEEDS)) == 1, "limit respected"
+
+        # A tenant with no queue and no seeds gets nothing, not someone
+        # else's subjects. This is the whole point of seeds being per-tenant.
+        assert next_topics(5, pathlib.Path("/nope"), DRAFTS_B, ()) == []
+
+        # Dedup is per tenant. B has never drafted "old topic", so A having done
+        # so must not suppress it for B. This is the bug that a shared draft log
+        # would have caused, and it would have looked like "no fresh topics".
+        keys_b = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS)]
+        assert "old topic" in keys_b, keys_b
+    finally:
+        read_jsonl = _real
+
+    when = datetime(2026, 8, 10, 9, 30)
+    m = format_draft("banger", "T", "the post", {"TAKE": 9}, when)
+    assert "the post" in m and "✅" in m and "T" in m, m
+    assert "Aug 10" in m and "09:30" in m, m
+    assert "NOT READY" not in m, "a clean draft must not carry the warning"
+
+    # A draft with blanks says so BEFORE the text, not after it. Someone
+    # skimming on a phone posts what they read first.
+    v = format_draft("banger", "T", "the [VERIFY: seat count] post",
+                     {"TAKE": 9}, when, verifies=["seat count", "the date"])
+    assert v.index("NOT READY") < v.index("the [VERIFY"), "warning must precede the draft"
+    assert "2 blank(s)" in v and "seat count" in v and "the date" in v, v
+    # And it must not offer the one-tap approve that would post it verbatim.
+    assert "✅" not in v, "a draft with blanks must not be one-tap postable"
+    assert "✏️" in v, v
+
+    print("heartbeat selftest: all assertions passed")
+
+
+def _arg(flag, default=None):
+    if flag not in sys.argv:
+        return default
+    i = sys.argv.index(flag)
+    return sys.argv[i + 1] if i + 1 < len(sys.argv) else default
+
+
+def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return 0
+
+    limit = None
+    if "--limit" in sys.argv:
+        limit_str = _arg("--limit")
+        if not str(limit_str).isdigit():
+            print(f"error: --limit must be a non-negative integer, got {limit_str!r}",
+                  file=sys.stderr)
+            return 2
+        limit = int(limit_str)
+
+    if "--all" in sys.argv:
+        ids = [t.id for t in tenants.list_tenants()]
+        if not ids:
+            print("no enabled tenants registered", file=sys.stderr)
+            return 1
+    else:
+        ids = [_arg("--tenant", tenants.LEGACY_TENANT)]
+
+    return run(ids, limit=limit, force="--force" in sys.argv, dry="--print" in sys.argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

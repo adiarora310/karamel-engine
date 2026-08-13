@@ -1,0 +1,24 @@
+# Everything the running system writes. Tracking any of it would leave every
+# install sitting on a dirty tree, and ./karamel update refuses to run on one.
+#
+# Each directory has to be un-ignored before anything inside it can be, which is
+# why this is three stanzas rather than one. The first version ignored the
+# .gitkeep markers along with everything else, so two directories the installer
+# expects simply did not exist after a clone.
+data/*
+!data/intakes/
+!data/tenants/
+!data/voice_cards/
+data/intakes/*
+data/tenants/*
+data/voice_cards/*
+!data/intakes/_QUESTIONNAIRE.md
+!data/intakes/_template.json
+!data/intakes/.gitkeep
+!data/tenants/.gitkeep
+!data/voice_cards/.gitkeep
+
+.karamel
+*.pyc
+__pycache__/
+.DS_Store
