@@ -120,9 +120,15 @@ def refresh_agents(owner):
                 break
             misses.append((label, (r.stderr or "").strip()))
         if not done:
-            if all("No such process" in e for _, e in misses):
-                notes.append(f"{short} not loaded under any known label, "
-                             f"nothing to restart")
+            # "Could not find service" is what launchctl says for an agent that
+            # was never loaded, which is the normal state for the reading half
+            # on an install that has it switched off. Reporting that as a failed
+            # restart puts a red line in front of somebody for a component
+            # working exactly as configured.
+            absent = ("No such process", "Could not find service")
+            if all(any(a in e for a in absent) for _, e in misses):
+                notes.append(f"{short} is not loaded, so there was nothing to "
+                             f"restart")
             else:
                 detail = "; ".join(f"{l}: {e[:60]}" for l, e in misses if e)
                 notes.append(f"{short} restart failed: {detail}")

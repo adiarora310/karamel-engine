@@ -17,7 +17,7 @@ from safety import MAX_REPLIES_PER_DAY, reply_allowed, reply_count_today
 from shared import (
     DATA, DRAFTS, ET, PROJECT, TELEGRAM_CFG,
     anti_pattern_hit, compose_url, has_em_dash, is_paused,
-    now_et_str, now_iso, now_utc, read_jsonl, send_message, short_id,
+    now_et_str, now_iso, now_utc, read_jsonl, short_id,
     write_jsonl_atomic,
 )
 
@@ -137,11 +137,42 @@ def format_draft(idx: int, batch_total: int, draft: dict) -> str:
     )
 
 
+def _tenant():
+    """Whose replies these are. The reply half predates the registry and sent
+    straight to the one configured Telegram chat, which is fine for one person
+    and silently wrong for two."""
+    try:
+        import tenants
+        return tenants.load_tenant(tenants.LEGACY_TENANT)
+    except Exception:
+        return None
+
+
+def _deliver(tenant, text, subject=None):
+    """Send through the tenant's own channel, or return None.
+
+    This used to call send_message directly, which is Telegram. An email-only
+    install therefore drafted replies and had nowhere to put them: the files
+    accumulated, the person saw nothing, and no error said so. Same failure the
+    original-content path had before it moved to channels."""
+    try:
+        import channels
+        return channels.send(tenant, text, subject=subject)
+    except Exception as e:
+        print(f"send failed: {e}", file=sys.stderr)
+        return None
+
+
 def main() -> int:
     if not DRAFTS.exists():
         print("drafts.jsonl missing", file=sys.stderr)
         return 1
-    if not TELEGRAM_CFG.exists():
+    tenant = _tenant()
+    kind = ((tenant.channel if tenant else None) or {}).get("type", "none")
+    if kind == "none":
+        print("no delivery channel configured for this tenant", file=sys.stderr)
+        return 1
+    if kind == "telegram" and not TELEGRAM_CFG.exists():
         print("telegram.json missing", file=sys.stderr)
         return 1
 
@@ -222,7 +253,7 @@ def main() -> int:
     if has_em_dash(header):
         print("ABORT: em-dash detected in header", file=sys.stderr)
         return 3
-    header_msg_id = send_message(header)
+    header_msg_id = _deliver(tenant, header, subject="[Karamel] reply drafts")
     if header_msg_id is None:
         print("failed to send batch header", file=sys.stderr)
         return 4
@@ -238,7 +269,9 @@ def main() -> int:
         if has_em_dash(text):
             print(f"ABORT row {i}: em-dash in formatted message", file=sys.stderr)
             continue
-        msg_id = send_message(text)
+        msg_id = _deliver(tenant, text,
+                          subject=f"[Karamel] #{draft['draft_id']} · reply to "
+                                  f"@{draft.get('author_handle', '?')}")
         if msg_id is None:
             print(f"row {i}: send failed", file=sys.stderr)
             continue
