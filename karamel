@@ -466,6 +466,22 @@ def cmd_dashboard():
     except (OSError, json.JSONDecodeError):
         tok = ""
     url = f"http://127.0.0.1:{port}" + (f"/?k={tok}" if tok else "")
+
+    # If the agent is already serving, just open it. Starting a second server on
+    # the same port is what ./karamel start leaves you set up for, and it used
+    # to answer with a socket traceback one line after printing this URL.
+    import socket
+    with socket.socket() as probe:
+        probe.settimeout(0.4)
+        already = probe.connect_ex(("127.0.0.1", int(port))) == 0
+    if already:
+        say(f"Already running: {url}")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        return 0
+
     try:
         webbrowser.open(url)
     except Exception:

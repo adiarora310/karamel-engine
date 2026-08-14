@@ -151,7 +151,25 @@ def recent_errors(limit=6):
     return found[:limit]
 
 
-def gather():
+def diff_words(a, b):
+    """(removed, added) word runs between a draft and what was actually posted.
+
+    The single most useful signal for an operator: what a person changes is
+    exactly what their voice card is getting wrong, and reading two paragraphs
+    side by side to spot it does not scale past the first week."""
+    import difflib
+
+    aw, bw = (a or "").split(), (b or "").split()
+    removed, added = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, aw, bw).get_opcodes():
+        if tag in ("replace", "delete") and i2 > i1:
+            removed.append(" ".join(aw[i1:i2]))
+        if tag in ("replace", "insert") and j2 > j1:
+            added.append(" ".join(bw[j1:j2]))
+    return removed, added
+
+
+def gather(full=False):
     import tenants
 
     owner = _owner()
@@ -180,7 +198,42 @@ def gather():
         pass
 
     loaded = agents()
+
+    # The operator view. Everything, because the question it answers is "why is
+    # this not working for them", and that lives in the parts a summary drops:
+    # the gate scores on drafts that never shipped, and the words somebody
+    # changed before posting.
+    activity = None
+    if full:
+        edits = []
+        for e in engage:
+            if e.get("status") == "posted_edited" and e.get("posted_text"):
+                rem, add = diff_words(e.get("draft_text"), e.get("posted_text"))
+                edits.append({"topic": e.get("topic"), "ts": e.get("ts_iso"),
+                              "removed": rem[:8], "added": add[:8]})
+        failures = []
+        for g in gen:
+            if g.get("verdict") == "PASS":
+                continue
+            rounds = []
+            for j in (g.get("journey") or []):
+                rounds.append({
+                    "n": j.get("round"), "scores": j.get("scores", {}),
+                    "why": j.get("why", ""), "fix": j.get("fix", ""),
+                    "tells": j.get("tells", []),
+                })
+            failures.append({"topic": g.get("topic"), "at": g.get("generated_at"),
+                             "rounds": rounds})
+        activity = {
+            "drafts": list(reversed(drafts)),
+            "edits": list(reversed(edits)),
+            "failures": list(reversed(failures))[:15],
+            "errors": recent_errors(limit=40),
+        }
+
     return {
+        "full": full,
+        "activity": activity,
         "owner": owner,
         "name": (t.name if t else owner),
         "now": now,
@@ -240,6 +293,12 @@ border-radius:8px;padding:.8rem;font-size:.9rem;overflow-x:auto}
 .foot{color:var(--dim);font-size:.82rem;margin-top:2rem;text-align:center}
 code{background:var(--bg);border:1px solid var(--line);border-radius:4px;
 padding:.1rem .35rem;font-size:.85em}
+.ev{padding:.7rem 0;border-bottom:1px solid var(--line)}
+.ev:last-child{border-bottom:0}
+.cut{color:var(--bad)}
+.add{color:var(--ok)}
+.op{background:var(--warn);color:#000;border-radius:5px;padding:.15rem .5rem;
+font-size:.72rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
 """
 
 
@@ -253,7 +312,9 @@ def render(d):
         "<!-- Karamel status -->",
         f"<style>{CSS}</style>",
         '<div class="wrap">',
-        f'<h1>Karamel, for {esc(d["name"])}</h1>',
+        f'<h1>Karamel, for {esc(d["name"])}'
+        + ('  <span class="op">operator view</span>' if d.get("full") else "")
+        + "</h1>",
         f'<p class="sub">{esc(d["now"].strftime("%A %d %B, %H:%M"))} '
         f'{esc(d["timezone"])}</p>',
 
@@ -329,6 +390,65 @@ def render(d):
                      '<code>./karamel doctor</code> for what to do about these.'
                      '</div></div>')
 
+    act = d.get("activity")
+    if act:
+        parts.append('<div class="card"><h2>Gate failures, most recent first</h2>')
+        if not act["failures"]:
+            parts.append('<div class="l">Nothing has failed the gate.</div>')
+        for f in act["failures"]:
+            parts.append(f'<div class="ev"><b>{esc(f["topic"])}</b> '
+                         f'<span class="k">{esc(ago(f["at"]))}</span>')
+            for r in f["rounds"]:
+                sc = " ".join(f"{k} {v}" for k, v in (r["scores"] or {}).items())
+                parts.append(f'<div class="mono l">round {esc(r["n"])} · {esc(sc)}</div>')
+                for q, t in (r["tells"] or [])[:4]:
+                    parts.append(f'<div class="mono err">tell: "{esc(q)}" ({esc(t)})</div>')
+                if r["why"]:
+                    parts.append(f'<div class="l">{esc(r["why"])}</div>')
+            parts.append("</div>")
+        parts.append('<div class="l" style="margin-top:.6rem">These never '
+                     'reached them. The scores say which axis blocked it, and a '
+                     'tell is the exact phrase that cost the points.</div></div>')
+
+        parts.append('<div class="card"><h2>What they changed before posting</h2>')
+        if not act["edits"]:
+            parts.append('<div class="l">Nothing edited yet. Every post so far '
+                         'went out as written, or was skipped.</div>')
+        for e in act["edits"]:
+            parts.append(f'<div class="ev"><b>{esc(e["topic"])}</b> '
+                         f'<span class="k">{esc(ago(e["ts"]))}</span>')
+            for r in e["removed"]:
+                parts.append(f'<div class="mono cut">- {esc(r[:160])}</div>')
+            for a in e["added"]:
+                parts.append(f'<div class="mono add">+ {esc(a[:160])}</div>')
+            parts.append("</div>")
+        parts.append('<div class="l" style="margin-top:.6rem">What somebody '
+                     'changes is what their voice card is getting wrong. This is '
+                     'the same signal the reflector reads.</div></div>')
+
+        parts.append('<div class="card"><h2>Every draft</h2>')
+        for r in act["drafts"]:
+            st = r.get("status", "pending")
+            parts.append(
+                f'<div class="ev"><b>{esc(r.get("topic"))}</b> '
+                f'<span class="k">{esc(ago(r.get("drafted_at")))} · {esc(st)}'
+                f'{" · blanks: " + str(len(r.get("needs_verify") or [])) if r.get("needs_verify") else ""}'
+                f'</span>'
+                f'<div class="q">{esc((r.get("draft_text") or "")[:900])}</div>')
+            if r.get("edited_text"):
+                parts.append(f'<div class="l">they posted:</div>'
+                             f'<div class="q">{esc(r["edited_text"][:900])}</div>')
+            parts.append("</div>")
+        parts.append("</div>")
+
+        if act["errors"]:
+            parts.append('<div class="card"><h2>Every error on the box</h2>')
+            for e in act["errors"]:
+                parts.append(f'<div class="row"><span class="mono err">'
+                             f'{esc(e["file"])}: {esc(e["line"])}</span>'
+                             f'<span class="k">{esc(e["when"])}</span></div>')
+            parts.append("</div>")
+
     parts += [
         '<p class="foot">Karamel never posts anything. Every post is published '
         'by you, by hand.<br>This page is read-only and only reachable from '
@@ -373,8 +493,10 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        from urllib.parse import urlparse, parse_qs
+        full = parse_qs(urlparse(self.path).query).get("full", ["0"])[0] == "1"
         try:
-            body = render(gather()).encode()
+            body = render(gather(full=full)).encode()
         except Exception as e:                       # never a blank page
             body = (f"<pre>dashboard failed to gather state:\n\n"
                     f"{html.escape(repr(e))}</pre>").encode()
@@ -402,6 +524,82 @@ def _refusal_text():
     selftest can assert the refusal exists without opening a socket."""
     return ("refusing to listen on <addr> with no token. This page shows "
             "drafts you have not published, your name and your email address.")
+
+
+# Invented, and it has to stay invented. This file ships to everyone, so a real
+# tenant's name in a demo fixture is that person's identity in every copy of the
+# software. The packager refused to publish over exactly this.
+DEMO = {
+    "name": "Sam Rivera", "owner": "sam-rivera",
+    "timezone": "America/Los_Angeles", "channel": "email",
+    "address": "sam@example.com", "card": "sam-rivera.md",
+    "card_ok": True, "running": True,
+    "agents": [{"label": f"com.karamel.{n}"} for n in
+               ("heartbeat", "inbox", "reflector", "doctor", "updater",
+                "dashboard")],
+    "drafts_total": 18, "answered": 15,
+    "counts": {"posted_clean": 6, "posted_edited": 5, "skipped": 4},
+    "gen_total": 24, "gen_passed": 18,
+    "pending": [
+        {"topic": "delegation and verification replacing typing speed",
+         "drafted_at": None},
+    ],
+    "last_draft": {
+        "topic": "the gap between what an AI dev tool promises and what it does",
+        "drafted_at": None, "status": "pending",
+        "draft_text": "A developer points an agent at a real repository, "
+        "watches it rename a helper and break two callers, and closes the tab "
+        "by lunchtime. That judgment was correct that morning.\n\nThe verdict "
+        "sat still while everything under it moved.",
+    },
+    "errors": [{"file": "inbox.err", "line":
+                "imaplib.IMAP4.error: AUTHENTICATIONFAILED", "when": "3 hours ago"}],
+    "spend": {"calls": 11, "usd": 0.0, "provider": "cli"},
+    "config_dir": "~/.config/karamel",
+}
+
+
+DEMO_ACTIVITY = {
+    "drafts": [
+        {"topic": "delegation and verification replacing typing speed",
+         "drafted_at": None, "status": "pending",
+         "draft_text": "The fastest developer I know types slowly.",
+         "needs_verify": ["the survey figure"]},
+        {"topic": "why vague instructions fail with agents",
+         "drafted_at": None, "status": "posted_edited",
+         "draft_text": "Vague instructions failed with human colleagues too.",
+         "edited_text": "Vague instructions always failed. Agents just made it "
+                        "obvious faster."},
+    ],
+    "edits": [{"topic": "why vague instructions fail with agents", "ts": None,
+               "removed": ["failed with human colleagues too."],
+               "added": ["always failed. Agents just made it obvious faster."]}],
+    "failures": [{
+        "topic": "the promise-to-reality gap", "at": None,
+        "rounds": [{"n": 0, "scores": {"VOICE": 8, "TAKE": 9, "SPECIFIC": 7,
+                                       "CLEAN": 6},
+                    "why": "lands a real verdict, but two tells",
+                    "fix": "none",
+                    "tells": [("Here is the thing", "throat-clearing"),
+                              ("significantly", "adverb crutch")]}],
+    }],
+    "errors": [{"file": "inbox.err",
+                "line": "imaplib.IMAP4.error: AUTHENTICATIONFAILED",
+                "when": "3 hours ago"}],
+}
+
+
+def demo(full=False):
+    """Render the page with plausible data, for reviewing how it reads.
+
+    An empty install shows zeroes everywhere, which is the least informative
+    version of a page whose whole job is showing what has happened."""
+    d = dict(DEMO)
+    d["now"] = datetime(2026, 8, 13, 11, 20)
+    d["next_run"] = next_run(d["now"])
+    d["full"] = full
+    d["activity"] = DEMO_ACTIVITY if full else None
+    return render(d)
 
 
 def selftest():
@@ -465,6 +663,34 @@ def selftest():
     # Compared in constant time, so a wrong token leaks nothing by timing.
     assert "compare_digest" in inspect.getsource(Handler._authorised)
 
+    # The operator view is opt-in and additive: the ordinary page must not
+    # start showing somebody's full draft history because a flag defaulted on.
+    plain = render(dict(d, full=False, activity=None))
+    assert "operator view" not in plain
+    assert "Every draft" not in plain
+
+    op = render(dict(d, full=True, activity={
+        "drafts": [{"topic": "t", "draft_text": "body", "status": "pending",
+                    "drafted_at": None}],
+        "edits": [{"topic": "t", "ts": None, "removed": ["was"], "added": ["is"]}],
+        "failures": [{"topic": "t", "at": None, "rounds": [
+            {"n": 0, "scores": {"CLEAN": 6}, "why": "w", "fix": "",
+             "tells": [("a phrase", "adverb crutch")]}]}],
+        "errors": [{"file": "x.err", "line": "boom", "when": "now"}],
+    }))
+    assert "operator view" in op
+    assert "Every draft" in op and "body" in op
+    assert "a phrase" in op and "adverb crutch" in op
+    assert "boom" in op
+
+    # The diff is the point of the view: what somebody changes is what their
+    # card is getting wrong.
+    rem, add = diff_words("the cat sat down", "the dog sat down")
+    assert rem == ["cat"] and add == ["dog"], (rem, add)
+    assert diff_words("same", "same") == ([], [])
+    assert diff_words("", "added words")[1] == ["added words"]
+    assert diff_words(None, None) == ([], [])
+
     print("dashboard selftest: all assertions passed")
     return True
 
@@ -473,8 +699,11 @@ def main():
     if "--selftest" in sys.argv:
         selftest()
         return 0
+    if "--demo" in sys.argv:
+        print(demo(full="--full" in sys.argv))
+        return 0
     if "--once" in sys.argv:
-        print(render(gather()))
+        print(render(gather(full="--full" in sys.argv)))
         return 0
 
     port = DEFAULT_PORT
@@ -505,7 +734,19 @@ def main():
         )
 
     Handler.token = token
-    srv = HTTPServer((bind, port), Handler)
+    try:
+        srv = HTTPServer((bind, port), Handler)
+    except OSError as e:
+        if e.errno == 48:
+            # Almost always the launchd agent already serving this page, which
+            # is the good case. Say that, rather than a traceback about sockets
+            # immediately after ./karamel start printed the URL.
+            print(f"Something is already serving port {port}.\n"
+                  f"If that is Karamel's own agent, the page is up: "
+                  f"http://127.0.0.1:{port}\n"
+                  f"Check with:  launchctl list | grep dashboard")
+            return 0
+        raise
     where = f"http://{'127.0.0.1' if bind in LOOPBACK else bind}:{port}"
     if token:
         print(f"Karamel status: {where}/?k={token}")
