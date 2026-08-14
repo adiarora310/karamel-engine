@@ -38,6 +38,10 @@ os.environ.setdefault("KARAMEL_HOME", str(ROOT))
 # flag where no component would ever see it.
 from shared import CONFIG_DIR as CONFIG  # noqa: E402
 
+# The exact string stop writes and start looks for. Anything else in that field
+# came from a tripwire and start must leave it alone.
+STOP_REASON = "stopped from ./karamel stop"
+
 
 # ----------------------------------------------------------------- utilities
 
@@ -336,8 +340,42 @@ def cmd_draft():
     ).returncode
 
 
+def _clear_own_halt():
+    """Undo the halt that ./karamel stop set, and nothing else.
+
+    stop writes halt: true so that nothing runs even if an agent is reloaded.
+    start never undid it, so a stop/start cycle left every component loaded and
+    every one of them exiting on the halt check: eleven agents running, doing
+    nothing, and saying so only in a log.
+
+    A TRIPWIRE halt is left exactly where it is. That flag is the record of the
+    listener hitting something it should not have, on an account that has been
+    labelled once already, and a start command silently clearing it would be
+    the single worst thing this file could do. Only a halt whose reason says
+    stop wrote it is cleared, and the reason is checked rather than assumed."""
+    path = CONFIG / "pause_state.json"
+    try:
+        st = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not st.get("halt"):
+        return
+    if st.get("halt_reason") != STOP_REASON:
+        say(f"  NOT starting: halted by something other than ./karamel stop.")
+        say(f"  reason: {st.get('halt_reason')}")
+        say("  Read that before clearing it. Run ./karamel doctor.")
+        return False
+    st["halt"] = False
+    st.pop("halt_reason", None)
+    path.write_text(json.dumps(st, indent=2))
+    say("  cleared the halt that ./karamel stop set")
+    return True
+
+
 def cmd_start():
     owner = _owner()
+    if _clear_own_halt() is False:
+        return 1
     rc = subprocess.run(
         [sys.executable, str(ROOT / "deploy" / "install.py"), "--owner", owner],
     ).returncode
@@ -415,7 +453,7 @@ def cmd_stop():
             n += 1
     CONFIG.mkdir(parents=True, exist_ok=True)
     (CONFIG / "pause_state.json").write_text(
-        json.dumps({"halt": True, "halt_reason": "stopped from ./karamel stop",
+        json.dumps({"halt": True, "halt_reason": STOP_REASON,
                     "halt_set_ts": None}, indent=2))
     say(f"Stopped {n} agent(s), and set halt so nothing runs even if reloaded.")
     say("Start again with: ./karamel start")
