@@ -238,12 +238,19 @@ def save_state(state):
 SUBJECT_MARKER = "[Karamel]"
 
 
-def search_uids(im, last):
-    """UIDs of our own threads newer than the watermark. Narrow by subject at
-    the server, not after fetching: fetching first means downloading a whole
-    mailbox to discard it."""
+def search_uids(im, last, days=30):
+    """UIDs of our own threads newer than the watermark.
+
+    Narrowed three ways, and all three are needed. By UID so old mail is not
+    reconsidered, by subject so nothing unrelated is ever fetched, and by date
+    because a SUBJECT search still costs the server a scan and a large mailbox
+    took longer than the socket timeout. A reply to a draft is recent by
+    definition: the draft was sent this week."""
+    from datetime import datetime, timedelta
+
+    since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
     typ, data = im.uid("search", None, "UID", f"{last + 1}:*",
-                       "SUBJECT", f'"{SUBJECT_MARKER}"')
+                       "SUBJECT", f'"{SUBJECT_MARKER}"', "SINCE", since)
     if typ != "OK":
         raise RuntimeError(f"IMAP search failed: {typ}")
     return [u for u in (data[0] or b"").split() if int(u) > last]
@@ -266,7 +273,9 @@ def run_once(dry=False, catch_up=False):
     first_run = "last_uid" not in state
     last = int(state.get("last_uid", 0))
 
-    with imaplib.IMAP4_SSL(host, port, timeout=30) as im:
+    # 30s was not enough against a real mailbox: the watchdog reported "the read
+    # operation timed out" rather than anything about mail.
+    with imaplib.IMAP4_SSL(host, port, timeout=90) as im:
         im.login(cfg["username"], cfg["password"])
         im.select("INBOX")
 
@@ -367,6 +376,9 @@ def selftest():
     assert search_uids(im, 6) == [b"7", b"8", b"9"]
     assert "SUBJECT" in im.args and '"[Karamel]"' in im.args, im.args
     assert "7:*" in im.args, im.args
+    # Bounded by date too. A subject search still costs the server a scan, and a
+    # real mailbox took longer than the socket timeout.
+    assert "SINCE" in im.args, im.args
     # Anything at or below the watermark is dropped even if the server returns it.
     im2 = _FakeIM()
     assert search_uids(im2, 8) == [b"9"]
