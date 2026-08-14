@@ -8,6 +8,7 @@ keep. It never posts anything.
     ./karamel status    is it working
     ./karamel dashboard a page showing what it has done and what is next
     ./karamel token     the password for that page, when it is not local
+    ./karamel share     a URL for that page the operator can open too
     ./karamel doctor    something is wrong, tell me what and how to fix it
     ./karamel logs      what went wrong, in the components' own words
     ./karamel update    get the latest version
@@ -533,6 +534,20 @@ def cmd_dashboard():
     ).returncode
 
 
+def cmd_share():
+    """A URL for the status page that the operator can open too.
+
+    Local-only is right for privacy and wrong for support: an install nobody can
+    look at gets debugged by asking somebody to paste terminal output, which is
+    exactly what does not scale."""
+    os.environ.setdefault("KARAMEL_OWNER", _owner())
+    return subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "share.py")] + sys.argv[2:],
+        env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
+             "KARAMEL_HOME": str(ROOT)},
+    ).returncode
+
+
 def cmd_token():
     """Mint the dashboard token, or print the existing one.
 
@@ -656,6 +671,7 @@ COMMANDS = {
     "stop": cmd_stop, "status": cmd_status, "voice": cmd_voice,
     "doctor": cmd_doctor, "logs": cmd_logs, "update": cmd_update,
     "dashboard": cmd_dashboard, "web": cmd_dashboard, "token": cmd_token,
+    "share": cmd_share,
 }
 
 # Every function named cmd_* has to be reachable. Two were written, wired into

@@ -63,12 +63,12 @@ AGENTS_SPEC = {
 # loads them. Chrome is here too: without it on the right port the listener's
 # connect_over_cdp fails and set_halt() fires, which reads like enforcement.
 READING_AGENTS = {
-    # Ten minutes. The read cap, not the interval, is what bounds a day: 200
+    # Twenty minutes. The read cap, not the interval, is what bounds a day: 200
     # reads at up to 30 a run means the cap binds after roughly seven full runs
     # regardless of how often this fires. A shorter interval buys freshness, not
     # volume, which is the point of it: a reply is worth sending while the post
     # is still live.
-    "listener": ("listener.py", [], 600),
+    "listener": ("listener.py", [], 1200),
     "evaluator": ("evaluator.py", [], 3600),
 }
 
