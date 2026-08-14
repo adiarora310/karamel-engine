@@ -12,6 +12,8 @@ for the tenant ids named in safety.REPLY_MINING_TENANTS.
 
 Flags: --force (skip window gate + jitter, for manual testing)
        --tenant ID (default "adi")
+       --source following|list  (one run only, does not change the record)
+       --list-id ID             (with --source list)
 """
 import random
 import re
@@ -211,6 +213,17 @@ def select_following(page):
     return True, "Following"
 
 
+def _flag(name, argv=None):
+    """Value after a CLI flag, or None. Overrides the tenant record for one run
+    only: nothing here writes config back."""
+    argv = argv if argv is not None else sys.argv
+    if name in argv:
+        i = argv.index(name)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
 def tenant_arg(argv):
     """--tenant ID, defaulting to adi. Returned raw: the gate matches raw."""
     if "--tenant" in argv:
@@ -227,8 +240,17 @@ def main(tenant):
     # Everything the listener touches is now the tenant's: their list, their
     # Chrome, their budget, their halt state. The only shared value left is the
     # pacing config, which is behavioural rather than identifying.
-    source = tenant.source
-    list_id = tenant.list_id or (cfg["list_id"] if tenant.is_legacy else None)
+    # A one-off run against the other source should not need a config edit.
+    # Reading both the Following timeline and a curated list is a legitimate
+    # thing to want on the same day, and editing the record between runs is how
+    # somebody ends up leaving it on the wrong one.
+    source = _flag("--source") or tenant.source
+    if source not in ("following", "list"):
+        print(f"--source must be following or list, got {source!r}",
+              file=sys.stderr)
+        return 2
+    list_id = (_flag("--list-id") or tenant.list_id
+               or (cfg["list_id"] if tenant.is_legacy else None))
     if source == "list" and not list_id:
         print(f"tenant '{tenant.id}' reads from a list but has no list_id. "
               f"Set one, or switch source to 'following'.", file=sys.stderr)
@@ -440,6 +462,13 @@ def selftest():
             raise RuntimeError("selector gone")
     sig = read_signals(Exploding())
     assert sig == {"verified": False, "via_repost": False, "is_reply": False}, sig
+
+    # The override is per run and never written back. Somebody testing the
+    # other source once should not silently leave the record pointing at it.
+    assert _flag("--source", ["x", "--source", "list"]) == "list"
+    assert _flag("--source", ["x"]) is None
+    assert _flag("--source", ["x", "--source"]) is None      # trailing flag
+    assert _flag("--list-id", ["x", "--list-id", "123"]) == "123"
 
     print("listener selftest: all assertions passed")
 
