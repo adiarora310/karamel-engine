@@ -195,12 +195,16 @@ def main():
     # the running system was using.
     CONFIG.mkdir(parents=True, exist_ok=True)
 
-    chrome = chrome_plist(owner)
-    if not dry:
-        with open(AGENTS / f"com.karamel.chrome-{owner}.plist", "wb") as f:
-            plistlib.dump(chrome, f)
-        written += 1
-        print(f"  wrote {AGENTS / f'com.karamel.chrome-{owner}.plist'}")
+    # NO CHROME AGENT. It was KeepAlive with RunAtLoad, launching Chrome with a
+    # dedicated --user-data-dir. When somebody has already opened Chrome on that
+    # profile by hand, which the setup instructions tell them to do, the second
+    # instance hands off to the first and exits immediately, launchd sees a dead
+    # job and respawns it, and the person gets a new window every thirty
+    # seconds. Observed on the host, 2026-08-14.
+    #
+    # Keeping a signed-in browser alive is a person's job, not launchd's: it
+    # needs a human to log in anyway, so there is nothing here worth automating
+    # at the cost of that failure mode.
 
     print(f"\n{written} agent(s) written, none loaded.")
     print("Load them one at a time, starting with the one that touches nothing:")

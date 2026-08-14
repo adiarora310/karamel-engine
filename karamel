@@ -420,7 +420,10 @@ def _reading_agents():
     if not allowed:
         say(f"  reading half stays off: {why}")
         return ()
-    return (f"chrome-{t.id}", "listener", "evaluator", "drafter", "notifier")
+    # No chrome agent: keeping a signed-in browser alive is a person's job.
+    # launchd cannot log into anything, and a KeepAlive Chrome racing a manual
+    # one for the same profile opened a window every thirty seconds.
+    return ("listener", "evaluator", "drafter", "notifier")
 
 
 def _reply_agents():
