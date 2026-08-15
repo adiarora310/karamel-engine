@@ -3,6 +3,9 @@
 Pre-flight: git pull, files exist, skip-window, pause state, daily cap.
 Find pending+un-notified drafts, sort by age, take 12, re-run anti-pattern filter.
 Send batch header, then one message per draft, capture telegram_msg_id into drafts.jsonl.
+
+Flags: --force (skip the posting window, for manual testing; the halt, the
+daily cap and the safety gate are still enforced)
 """
 
 from __future__ import annotations
@@ -176,10 +179,22 @@ def main() -> int:
         print("telegram.json missing", file=sys.stderr)
         return 1
 
+    # --force skips the posting window and nothing else, matching what the flag
+    # already means in listener.py and drafter.py. Without it the reply half was
+    # untestable for two days a week: on a Saturday the window is closed all
+    # day, so a draft could be scraped and written and then sat on with no way
+    # to see it arrive short of waiting for Monday.
+    #
+    # The halt, the daily cap and the safety gate below are NOT skipped. A
+    # manual test that can push past a tripwire is not a test, it is the thing
+    # the tripwire exists to stop.
+    force = "--force" in sys.argv
     skip = skip_window_reason()
-    if skip:
+    if skip and not force:
         print(f"skip window: {skip}")
         return 0
+    if skip and force:
+        print(f"window closed ({skip}), forced")
 
     paused, reason = is_paused()
     if paused:
