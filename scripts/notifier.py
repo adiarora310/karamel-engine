@@ -2,7 +2,7 @@
 
 Pre-flight: git pull, files exist, skip-window, pause state, daily cap.
 Find pending+un-notified drafts, sort by age, take 12, re-run anti-pattern filter.
-Send batch header, then one message per draft, capture telegram_msg_id into drafts.jsonl.
+One message per draft, capturing the delivery id into drafts.jsonl.
 
 Flags: --force (skip the posting window, for manual testing; the halt, the
 daily cap and the safety gate are still enforced)
@@ -20,7 +20,7 @@ from safety import MAX_REPLIES_PER_DAY, reply_allowed, reply_count_today
 from shared import (
     DATA, DRAFTS, ET, PROJECT, TELEGRAM_CFG,
     anti_pattern_hit, compose_url, has_em_dash, is_paused,
-    now_et_str, now_iso, now_utc, read_jsonl, short_id,
+    now_iso, now_utc, read_jsonl, short_id,
     write_jsonl_atomic,
 )
 
@@ -265,17 +265,16 @@ def main() -> int:
         return 0
 
     n = len(accepted)
-    tier1 = sum(1 for i in accepted if rows[i].get("tier") == 1)
 
-    # batch header
-    header = f"[BATCH {now_et_str('%H:%M ET')} · {n} draft{'s' if n != 1 else ''} · {tier1} Tier-1]"
-    if has_em_dash(header):
-        print("ABORT: em-dash detected in header", file=sys.stderr)
-        return 3
-    header_msg_id = _deliver(tenant, header, subject="[Karamel] reply drafts")
-    if header_msg_id is None:
-        print("failed to send batch header", file=sys.stderr)
-        return 4
+    # No batch header. It was one line, "[BATCH 09:14 ET . 2 drafts . 0
+    # Tier-1]", and it made sense on Telegram where a batch lands as a burst in
+    # one chat and a marker separates it from conversation. In a mailbox it is
+    # a near-empty message that costs an unread and carries nothing to act on.
+    #
+    # It also doubled as a reachability probe: if the header failed to send,
+    # this returned before attempting the drafts. That is not lost. Each
+    # per-draft send is checked on its own below, and a channel that is down
+    # fails the first one, which is the same signal one message later.
 
     # per-draft sends
     sent_count = 0
@@ -298,14 +297,13 @@ def main() -> int:
         draft["notified_ts"] = now_iso()
         draft["notifier_message_id"] = msg_id  # legacy field
         draft["telegram_msg_id"] = msg_id      # §12.2 field
-        draft["batch_header_msg_id"] = header_msg_id
         draft["compose_url"] = compose_url(draft["tweet_id"], draft.get("draft_text", ""))
         sent_count += 1
 
     # persist
     write_jsonl_atomic(DRAFTS, rows)
     write_counter(used + sent_count)
-    print(f"sent {sent_count}/{n} drafts (header msg_id={header_msg_id})")
+    print(f"sent {sent_count}/{n} drafts")
     return 0
 
 
