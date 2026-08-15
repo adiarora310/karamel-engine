@@ -40,6 +40,7 @@ import imaplib
 import json
 import os
 import re
+from html import unescape
 import sys
 from email.header import decode_header, make_header
 
@@ -106,14 +107,56 @@ def body_text(msg):
     """The text/plain part, preferring it over any HTML alternative."""
     if not msg.is_multipart():
         payload = msg.get_payload(decode=True) or b""
-        return payload.decode(msg.get_content_charset() or "utf-8", "replace")
+        text = payload.decode(msg.get_content_charset() or "utf-8", "replace")
+        # A single-part text/html message is the HTML-only case, and this branch
+        # used to hand the raw markup straight to the token parser: tags and all,
+        # quoted original included, so it matched whatever token appeared first
+        # in our own instruction line.
+        if msg.get_content_type() == "text/html":
+            return html_to_text(text)
+        return text
+    html = None
     for part in msg.walk():
-        if part.get_content_type() == "text/plain" and "attachment" not in str(
-            part.get("Content-Disposition") or ""
-        ):
+        if "attachment" in str(part.get("Content-Disposition") or ""):
+            continue
+        ctype = part.get_content_type()
+        if ctype == "text/plain":
             payload = part.get_payload(decode=True) or b""
             return payload.decode(part.get_content_charset() or "utf-8", "replace")
-    return ""
+        if ctype == "text/html" and html is None:
+            payload = part.get_payload(decode=True) or b""
+            html = payload.decode(part.get_content_charset() or "utf-8", "replace")
+    # Falling back rather than returning nothing. A client that sends HTML with
+    # no text/plain alternative used to yield "", which strip_quoted turned into
+    # "" and apply_reply logged as an unrecognised reply: the person answered,
+    # the answer was discarded, and the draft sat pending forever. Their reply is
+    # the only signal the reflector learns from, so losing it silently is worse
+    # than parsing it imperfectly.
+    return html_to_text(html) if html else ""
+
+
+TAG_RE = re.compile(r"<[^>]+>")
+BREAK_RE = re.compile(r"(?i)<\s*(br|/p|/div|/li|/tr)\s*/?\s*>")
+DROP_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+BLOCKQUOTE_RE = re.compile(r"(?is)<\s*blockquote\b")
+
+
+def html_to_text(html):
+    """Enough HTML handling to read a reply. Not a renderer.
+
+    Cut at the first blockquote, because that is where every mail client puts
+    the quoted original, and our draft email ends with a line naming all three
+    reply tokens: parsing past it would find "posted" in a reply that said skip.
+    strip_quoted() catches the plain-text spelling of the same trap."""
+    cut = BLOCKQUOTE_RE.search(html)
+    if cut:
+        html = html[:cut.start()]
+    html = DROP_RE.sub(" ", html)
+    html = BREAK_RE.sub("\n", html)
+    text = TAG_RE.sub("", html)
+    text = unescape(text)
+    lines = [l.strip() for l in text.splitlines()]
+    return "\n".join(l for l in lines if l).strip()
 
 
 def tenant_for_sender(addr):
@@ -335,7 +378,60 @@ def run_once(dry=False, catch_up=False):
 
 # ------------------------------- tests ---------------------------------------
 
+def selftest_html():
+    """An HTML-only reply must still be readable.
+
+    body_text returned "" for these, strip_quoted turned that into "", and
+    apply_reply logged an unrecognised reply: the person answered, the answer
+    was thrown away, and the draft stayed pending forever. A reply is the only
+    signal reflector.py learns from, so losing one silently costs more than a
+    rough parse."""
+    import email as _email
+
+    raw = (
+        "From: someone@example.com\r\n"
+        "Subject: Re: [Karamel] #1786826862679 draft\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n\r\n"
+        '<div dir="ltr">posted</div>'
+        '<blockquote class="gmail_quote">'
+        "On Sat wrote:<br>[KARAMEL DRAFT]<br>posted skip edited"
+        "</blockquote>"
+    )
+    msg = _email.message_from_string(raw)
+    text = strip_quoted(body_text(msg))
+    assert text == "posted", repr(text)
+    assert poller.parse_reply_tokens(text)[0] == "posted_clean", text
+
+    # The cut at the blockquote is the whole correctness argument: our own
+    # email ends with a line naming all three tokens, so reading past the quote
+    # marks a reply that said skip as posted.
+    skip = _email.message_from_string(
+        raw.replace('<div dir="ltr">posted</div>', "<div>skip</div>"))
+    assert poller.parse_reply_tokens(
+        strip_quoted(body_text(skip)))[0] == "skipped"
+
+    # An edit survives with its text, which is what the reflector reads.
+    edited = _email.message_from_string(
+        raw.replace('<div dir="ltr">posted</div>',
+                    "<p>edited</p><p>the version I actually posted</p>"))
+    status, text, _ = poller.parse_reply_tokens(strip_quoted(body_text(edited)))
+    assert status == "posted_edited", status
+    assert text == "the version I actually posted", repr(text)
+
+    # text/plain still wins when both parts are present.
+    both = _email.message_from_string(
+        "From: a@b.c\r\nSubject: x\r\n"
+        'Content-Type: multipart/alternative; boundary="B"\r\n\r\n'
+        "--B\r\nContent-Type: text/plain\r\n\r\nskip\r\n"
+        "--B\r\nContent-Type: text/html\r\n\r\n<div>posted</div>\r\n--B--\r\n")
+    assert strip_quoted(body_text(both)) == "skip", body_text(both)
+
+    # Entities decode, so a reply typed with an apostrophe is not mangled.
+    assert html_to_text("<p>it&#39;s posted</p>") == "it's posted"
+
+
 def selftest():
+    selftest_html()
 
     # The first run must not read the whole mailbox. Observed live on the host:
     # a watermark of zero meant "every message this account ever received", so
