@@ -66,7 +66,9 @@ QUOTE_MARKERS = (
     # lists all three words and would match whichever came first.
     re.compile(r"^\s*Reply to this email with one word", re.IGNORECASE),
     re.compile(r"^\s*Fill the blank\(s\) above first", re.IGNORECASE),
-    re.compile(r"^\s*Post it:\s*https?://", re.IGNORECASE),
+    # Both wordings: drafts already in the mailbox carry the shorter one.
+    re.compile(r"^\s*(Click on the link to )?post it:\s*https?://",
+               re.IGNORECASE),
     re.compile(r"^\s*Draft #\d{6,}", re.IGNORECASE),
     re.compile(r"^\s*NOT READY TO POST", re.IGNORECASE),
     # The pre-2026-08 format. Kept because drafts already in the mailbox still

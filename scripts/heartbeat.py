@@ -260,16 +260,17 @@ def format_draft(register, topic, text, scores, when, verifies=(), draft_id=None
     # [VERIFY: ...] slot is not postable, and handing someone a one-click post
     # button for it is handing them a way to publish a placeholder: the warning
     # at the top says stop, and a button underneath saying go would win.
-    open_line = "" if verifies else f"Post it: {post_url(text)}\n\n"
+    open_line = ("" if verifies else
+                 f"Click on the link to post it: {post_url(text)}\n\n")
 
     tail = ("Reply to this email with one word or emoji:\n"
-            "Posted ✅  You published it as written.\n"
-            "Skip ❌  You binned it.\n"
-            "Edited ✏️  Followed by what you actually posted.")
+            "Posted or ✅: You published it as written.\n"
+            "Skip or ❌: You binned it.\n"
+            "Edited or ✏️: Followed by what you actually posted.")
     if verifies:
         tail = ("Fill the blank(s) above first, then reply:\n"
-                "Edited ✏️  Followed by the finished text,\n"
-                "so the version that gets recorded is the one you posted.")
+                "Edited or ✏️: Followed by the finished text, so the version "
+                "that gets recorded is the one you posted.")
 
     # The id moved out of the subject and lives here. inbox.py reads it from
     # the RAW body of a reply, before the quoted original is stripped, so it
@@ -552,8 +553,15 @@ def selftest():
     assert "twitter://" not in m, "the scheme link is not tappable in Gmail"
     assert "the%20post" in m, ("draft text must be url-encoded into the link", m)
     assert "in_reply_to" not in m, "an original is not a reply"
-    assert m.index("the post") < m.index("Post it"), \
+    assert m.index("the post") < m.index("to post it:"), \
         "the draft comes before the button, so it is read before it is posted"
+
+    # Word or emoji, joined by "or" and separated from the meaning by a colon.
+    for line in ("Posted or ✅: You published it as written.",
+                 "Skip or ❌: You binned it.",
+                 "Edited or ✏️: Followed by what you actually posted."):
+        assert line in m, (line, m)
+    assert "Click on the link to post it:" in m, m
 
     # A draft with blanks says so BEFORE the text, not after it. Someone
     # skimming on a phone posts what they read first.
