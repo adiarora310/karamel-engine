@@ -37,6 +37,7 @@ import critic
 import gen
 import tenants
 from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
+from shared import post_url
 
 # Seeds are evergreen and voice-neutral by design: they exist so the loop always
 # has something to chew on, not to be good posts. A tenant with real topics in
@@ -119,6 +120,16 @@ def format_draft(register, topic, text, scores, when, verifies=()):
     #
     # It lives here rather than in a setup document because this is where it is
     # needed: at the moment of replying, months after anyone read the setup.
+    # One click to a composer with the text already in it, instead of selecting
+    # a paragraph out of a mail client. Copying by hand is where smart quotes,
+    # lost line breaks and a trailing "(gate {...})" come from.
+    #
+    # Deliberately absent when there are blanks to fill. A draft with a
+    # [VERIFY: ...] slot is not postable, and handing someone a one-click post
+    # button for it is handing them a way to publish a placeholder: the warning
+    # at the top says stop, and a button underneath saying go would win.
+    open_line = "" if verifies else f"Post it: {post_url(text)}\n\n"
+
     tail = (f"(gate {scores})\n\n"
             f"Reply to this email with one word:\n"
             f"  posted   you published it as written\n"
@@ -130,7 +141,7 @@ def format_draft(register, topic, text, scores, when, verifies=()):
                 f"Fill the blank(s) above first, then reply with\n"
                 f"  edited   followed by the finished text\n"
                 f"so the posted version is what gets recorded.")
-    return head + f"Topic: {topic}\n\n{text}\n\n" + tail
+    return head + f"Topic: {topic}\n\n{text}\n\n" + open_line + tail
 
 
 def run_tenant(tenant, limit=None, force=False, dry=False):
@@ -351,6 +362,15 @@ def selftest():
     assert "Aug 10" in m and "09:30" in m, m
     assert "NOT READY" not in m, "a clean draft must not carry the warning"
 
+    # A link that opens the composer with the text already in it. Publishing
+    # used to mean selecting a paragraph out of a mail client, which is where
+    # smart quotes and lost line breaks come from.
+    assert "x.com/intent/post" in m, m
+    assert "the%20post" in m, ("draft text must be url-encoded into the link", m)
+    assert "in_reply_to" not in m, "an original is not a reply"
+    assert m.index("the post") < m.index("Post it:"), \
+        "the draft comes before the button, so it is read before it is posted"
+
     # A draft with blanks says so BEFORE the text, not after it. Someone
     # skimming on a phone posts what they read first.
     v = format_draft("banger", "T", "the [VERIFY: seat count] post",
@@ -359,6 +379,10 @@ def selftest():
     assert "2 blank(s)" in v and "seat count" in v and "the date" in v, v
     # And it must not offer the one-tap approve that would post it verbatim.
     assert "✅" not in v, "a draft with blanks must not be one-tap postable"
+    # Including the composer link. The warning at the top says stop; a button
+    # underneath saying go would win, and what gets published is a placeholder.
+    assert "intent/post" not in v, \
+        "a draft with unfilled blanks must not be one click from publication"
     assert "edited" in v, v
     assert "✏️" not in v, "emoji instruction is a Telegram-era leftover"
 

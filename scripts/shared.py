@@ -271,11 +271,29 @@ def parse_pause_duration(token: str) -> timedelta | None:
     return None
 
 
+def post_url(draft_text: str, in_reply_to: str | None = None) -> str:
+    """A link that opens X's composer with this text already in it.
+
+    One helper for both kinds of draft. Replies pass in_reply_to and thread
+    correctly; originals omit it and open a blank composer, which is what an
+    original post needs and what it never had: the email carried the text and
+    nothing else, so publishing meant selecting a paragraph out of a mail client
+    and pasting it, which is where stray quote marks and lost line breaks come
+    from.
+
+    x.com/intent/post is the current spelling. twitter.com/intent/tweet still
+    redirects, but a link that visibly bounces through a retired domain looks
+    broken to the person clicking it."""
+    url = "https://x.com/intent/post?text=" + parse.quote(draft_text, safe="")
+    if in_reply_to:
+        url += "&in_reply_to=" + parse.quote(str(in_reply_to), safe="")
+    return url
+
+
 def compose_url(tweet_id: str, draft_text: str) -> str:
-    return (
-        "https://twitter.com/intent/tweet?in_reply_to=" + tweet_id
-        + "&text=" + parse.quote(draft_text, safe="")
-    )
+    """Reply composer. Kept as its own name because notifier and drafter both
+    call it and both store its output under a compose_url key."""
+    return post_url(draft_text, in_reply_to=tweet_id)
 
 
 def short_id(tweet_id: str | None) -> str:
