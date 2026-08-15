@@ -32,7 +32,14 @@ EVERY_DAYS = 7
 
 
 def parse_ts(row):
-    for k in ("ts_iso", "ts", "drafted_at", "confirmed_ts", "queued_ts"):
+    # generated_at is the key generated.jsonl uses, and it was missing from this
+    # list when the original-post section was added, so every row from that file
+    # fell out of the window and the digest reported "Cleared the critic: 0/0"
+    # on a week with five drafts. A row whose timestamp cannot be read is
+    # dropped by within(), which makes a missing key here look like no activity
+    # rather than like a bug.
+    for k in ("ts_iso", "ts", "drafted_at", "generated_at", "confirmed_ts",
+              "queued_ts", "added_at"):
         v = row.get(k)
         if v:
             try:
@@ -293,6 +300,18 @@ def selftest():
         watermark(t).write_text("2026-01-01T00:00:00")
         owed, _ = due(t)
         assert owed, "a naive watermark must not raise"
+
+    # Every file this digest reads must have its timestamp key understood.
+    # within() drops a row it cannot date, so a key missing from parse_ts reads
+    # as "nothing happened" rather than as a bug: the original-post section
+    # shipped reporting 0/0 on a week with five drafts because generated.jsonl
+    # stamps generated_at and this list did not know it.
+    now = datetime.now(timezone.utc).isoformat()
+    for key in ("ts_iso", "drafted_at", "generated_at", "confirmed_ts",
+                "queued_ts", "added_at"):
+        assert parse_ts({key: now}) is not None, key
+    assert parse_ts({"no_timestamp_here": now}) is None
+    assert parse_ts({"generated_at": "not a date"}) is None
 
     # Flags typed without their value fall back instead of raising IndexError.
     _real_argv = sys.argv
