@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 import llm
 from karamel_common import (
     DATA, ROOT, append_jsonl, compose_url, in_posting_window, is_paused,
-    now_iso, read_jsonl,
+    load_config, now_iso, read_jsonl,
 )
 import tenants
 from safety import MAX_REPLIES_PER_DAY, reply_allowed, reply_count_today
@@ -26,7 +26,28 @@ CANDIDATES = DATA / "candidates.jsonl"
 DRAFTS = DATA / "drafts.jsonl"
 VOICE_CARD = ROOT / "03_voice_card.md"
 EM_DASH = re.compile("[–—]")
-MAX_CANDIDATE_AGE_BEFORE_DRAFT_MIN = 90  # stale candidates aren't worth drafting
+# Floor only. The real bound is max_age_minutes from config, the same setting
+# the listener captures against, because a drafter stricter than the listener
+# is a pipeline that scrapes posts it has already decided never to answer.
+#
+# It was a hardcoded 90 while the shipped config says 240, so everything
+# between the two was written to candidates.jsonl and then dropped with
+# "skipped N stale candidate(s)". On a real timeline, where observed posts were
+# 145 to 392 minutes old, that is nearly every candidate: the listener worked,
+# the file filled up, and no reply draft was ever produced.
+MIN_CANDIDATE_AGE_BOUND_MIN = 90
+
+
+def max_candidate_age():
+    """The age past which a candidate is not worth answering.
+
+    Never below the floor, so a config that sets a very small max_age does not
+    also make the drafter drop things the moment they queue."""
+    try:
+        return max(int(load_config().get("max_age_minutes", 0)),
+                   MIN_CANDIDATE_AGE_BOUND_MIN)
+    except Exception:
+        return MIN_CANDIDATE_AGE_BOUND_MIN
 # Whose budget and files this bills. Reads the owner of this installation
 # rather than a name compiled in: on a self-hosted copy the operator is not
 # called "adi", and hardcoding it billed their replies to a tenant that does not
@@ -142,16 +163,16 @@ def main():
     # from days ago. Replying that late is both useless and conspicuous, and it
     # is exactly what a restart after a long gap produces: candidates.jsonl
     # still holds rows the listener found before it was retired.
+    bound = max_candidate_age()
     fresh, stale = [], 0
     for c in pending:
         age = effective_age_minutes(c)
-        if age is not None and age > MAX_CANDIDATE_AGE_BEFORE_DRAFT_MIN:
+        if age is not None and age > bound:
             stale += 1
             continue
         fresh.append(c)
     if stale:
-        print(f"skipped {stale} stale candidate(s) over "
-              f"{MAX_CANDIDATE_AGE_BEFORE_DRAFT_MIN}m old")
+        print(f"skipped {stale} stale candidate(s) over {bound}m old")
     pending = fresh
 
     # Never draft more than can actually be sent today.
@@ -238,5 +259,55 @@ def main():
     return 0
 
 
+def selftest():
+    """This file had no selftest, so `drafter.py --selftest` ran the drafter.
+
+    The staleness bound is what it covers, because that is where this file
+    silently threw away everything the listener had just captured."""
+    import karamel_common
+
+    real = karamel_common.load_config
+    global load_config
+    _saved = load_config
+    try:
+        # The shipped config. The drafter must not be stricter than the
+        # listener, or the pipeline scrapes posts it has already decided never
+        # to answer, which is exactly what a hardcoded 90 against a shipped 240
+        # did: candidates.jsonl filled and no reply was ever drafted.
+        load_config = lambda: {"max_age_minutes": 240}
+        assert max_candidate_age() == 240, max_candidate_age()
+
+        # The floor holds, so a tight max_age does not make the drafter drop
+        # candidates in the minutes between the listener writing one and this
+        # running: they are on separate schedules and one always trails.
+        load_config = lambda: {"max_age_minutes": 15}
+        assert max_candidate_age() == MIN_CANDIDATE_AGE_BOUND_MIN
+
+        # Missing key and unreadable config both fall back rather than raise.
+        load_config = lambda: {}
+        assert max_candidate_age() == MIN_CANDIDATE_AGE_BOUND_MIN
+
+        def boom():
+            raise OSError("no config")
+
+        load_config = boom
+        assert max_candidate_age() == MIN_CANDIDATE_AGE_BOUND_MIN
+    finally:
+        load_config = _saved
+        karamel_common.load_config = real
+
+    # Age is measured from now, not from discovery: a candidate that sat in the
+    # file overnight still reports the age the listener saw.
+    assert effective_age_minutes({"age_minutes": None}) is None
+    old = effective_age_minutes(
+        {"age_minutes": 10, "discovered_at": "2020-01-01T00:00:00Z"})
+    assert old is not None and old > 10000, old
+
+    print("drafter selftest: all assertions passed")
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv:
+        selftest()
+        sys.exit(0)
     sys.exit(main())
