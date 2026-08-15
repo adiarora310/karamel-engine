@@ -255,7 +255,17 @@ def main(tenant):
         print(f"tenant '{tenant.id}' reads from a list but has no list_id. "
               f"Set one, or switch source to 'following'.", file=sys.stderr)
         return 2
-    cdp_port = tenant.cdp_port if not tenant.is_legacy else cfg["cdp_port"]
+    # The tenant's own port, always, because the tenant record is what the
+    # bootstrap launched Chrome with. This used to fall back to cfg["cdp_port"]
+    # for the legacy tenant, and since LEGACY_TENANT follows KARAMEL_OWNER,
+    # EVERY person is legacy on their own Mac: tenant.cdp_port was dead code and
+    # every install used the config default of 9222. That is right for a tenant
+    # whose port is 9222 and wrong for everybody else. The second user's
+    # bootstrap opens Chrome on 9223 and nothing writes cdp_port into
+    # karamel.json, so his listener connected to an empty port, failed, and
+    # set_halt() fired: the reading half dead on arrival, reported in the one
+    # way that reads as platform enforcement rather than a misconfiguration.
+    cdp_port = tenant.cdp_port or cfg["cdp_port"]
     cap = tenant.max_reads_per_day if not tenant.is_legacy else cfg["max_reads_per_day"]
 
     if is_paused(tenant):
@@ -363,6 +373,24 @@ def main(tenant):
 
 
 def selftest():
+    # The CDP port must come from the tenant record, because that is what the
+    # bootstrap launched Chrome with. This was `tenant.cdp_port if not
+    # tenant.is_legacy else cfg["cdp_port"]`, and since LEGACY_TENANT follows
+    # KARAMEL_OWNER every person is legacy on their own Mac: the record was
+    # never read, every install used the 9222 default, and the second user's
+    # bootstrap opens 9223. His listener attached to nothing and set_halt()
+    # fired, which is the flag that means a platform tripwire tripped.
+    import tenants as _t
+    for port in (9222, 9223, 9333):
+        fake = _t.Tenant({"id": "x", "cdp_port": port})
+        assert (fake.cdp_port or 9222) == port, (port, fake.cdp_port)
+    # And a record with no port still falls back rather than resolving to None.
+    assert (_t.Tenant({"id": "x"}).cdp_port or 9222) == 9222
+    from pathlib import Path as _P
+    src = _P(__file__).read_text()
+    assert 'cdp_port = tenant.cdp_port or cfg' in src, \
+        "the port must not depend on which tenant happens to own the box"
+
     class FakeTab:
         def __init__(self, label, selected):
             self.label, self._sel, self.clicked = label, selected, False

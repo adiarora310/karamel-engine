@@ -64,7 +64,28 @@ TENANT_DIR = CONFIG_DIR / "tenants"
 # under a stranger's name and a bare `heartbeat.py` would look for a tenant that
 # does not exist. KARAMEL_OWNER is set by deploy/install.py into each agent's
 # environment.
-LEGACY_TENANT = os.environ.get("KARAMEL_OWNER") or "adi"
+def _owner_marker():
+    """The owner recorded in .karamel, written by the bootstrap. None if absent.
+
+    The env var is only set inside the launchd agents. Anything run by hand,
+    which is most of debugging, had nothing but the literal fallback below, so
+    the same command produced different answers depending on whether an agent
+    or a person invoked it. This file is what makes both agree."""
+    try:
+        return (json.loads((PROJECT / ".karamel").read_text())
+                .get("owner") or None)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+# The fallback is a placeholder, deliberately not a person's name. It was the
+# author's first name, which shipped in the public package in four files: on
+# someone else's Mac a bare `heartbeat.py` looked for a tenant named after a
+# stranger, found nothing, and said so in a way that gave no hint why. The
+# package audit catches the full name and the handle, but cannot blanket-block
+# three letters that also appear inside ordinary English words.
+LEGACY_TENANT = (os.environ.get("KARAMEL_OWNER") or _owner_marker()
+                 or "owner")
 
 VALID_CHANNELS = ("telegram", "email", "none")
 VALID_SOURCES = ("following", "list")

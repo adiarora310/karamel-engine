@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import tenants
 from karamel_common import (
     add_reads, is_paused, load_config, now_iso, read_jsonl, reads_today,
     set_halt,
@@ -165,6 +166,14 @@ def main():
         return 0
 
     cfg = load_config()
+    # The owner's port, same source the listener and the bootstrap use. This
+    # file had no tenant awareness at all and read cfg["cdp_port"], which is
+    # 9222 unless karamel.json says otherwise, and nothing writes cdp_port
+    # there. On any install whose bootstrap opened Chrome on a different port
+    # this attaches to nothing, and the failure below calls set_halt(), which
+    # is the flag that means a platform tripwire fired.
+    owner = tenants.load_tenant(tenants.LEGACY_TENANT)
+    cdp_port = (owner.cdp_port if owner else None) or cfg["cdp_port"]
     if not force and reads_today() >= cfg["max_reads_per_day"]:
         print("daily read cap reached, exiting")
         return 0
@@ -187,7 +196,7 @@ def main():
     evaluated = 0
     with sync_playwright() as p:
         try:
-            browser = p.chromium.connect_over_cdp(f"http://localhost:{cfg['cdp_port']}")
+            browser = p.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
         except Exception as e:
             set_halt(f"CDP attach failed in evaluator: {e}")
             return 1
