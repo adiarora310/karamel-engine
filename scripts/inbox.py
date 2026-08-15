@@ -159,6 +159,27 @@ def html_to_text(html):
     return "\n".join(l for l in lines if l).strip()
 
 
+def is_our_own_outgoing(msg):
+    """True for a draft Karamel sent, as opposed to a person's reply to one.
+
+    The server-side search matches on the subject marker, and our own outgoing
+    drafts carry that marker too, so this loop was reading Karamel's own mail
+    back and trying to parse it as an answer. Mostly it failed harmlessly and
+    logged "unrecognised reply" or "no matching draft" against our own subject
+    lines, which is exactly the noise seen in the log.
+
+    Sender cannot decide it: the person replies from the same address the
+    drafts are sent from, which is the whole reason self-addressed mail is
+    involved. What separates them is that a reply is a reply. Every client sets
+    In-Reply-To or prefixes Re:, and nothing Karamel sends does either."""
+    if (msg.get("In-Reply-To") or "").strip():
+        return False
+    subject = (header(msg, "Subject") or "").strip().lower()
+    if subject.startswith(("re:", "re :", "fwd:", "fw:")):
+        return False
+    return True
+
+
 def tenant_for_sender(addr):
     """The tenant who owns this address, or None. Never guesses."""
     if not addr:
@@ -351,10 +372,20 @@ def run_once(dry=False, catch_up=False):
 
         highest, handled, ignored = last, [], 0
         for uid in uids:
-            typ, raw = im.uid("fetch", uid, "(RFC822)")
+            # PEEK, so reading a mailbox never changes it. A plain (RFC822)
+            # fetch sets \Seen, and this runs every five minutes against a
+            # search that also matches our OWN outgoing drafts: every draft
+            # Karamel sent itself was marked read within five minutes of
+            # arriving. Combined with Gmail filing self-addressed mail as
+            # already-read, the person got no unread badge and no notification
+            # and reasonably concluded nothing had been sent.
+            typ, raw = im.uid("fetch", uid, "(BODY.PEEK[])")
             if typ != "OK" or not raw or not raw[0]:
                 continue
             msg = email.message_from_bytes(raw[0][1])
+            if is_our_own_outgoing(msg):
+                ignored += 1
+                continue
             t = tenant_for_sender(sender_address(msg))
             line = apply_reply(t, msg, dry=dry)
             # One line per unmatched message turns a stuck mailbox into
@@ -428,6 +459,22 @@ def selftest_html():
 
     # Entities decode, so a reply typed with an apostrophe is not mangled.
     assert html_to_text("<p>it&#39;s posted</p>") == "it's posted"
+
+    # Our own outgoing drafts must not be read back as answers. The server-side
+    # search matches the subject marker, which our own mail carries too.
+    ours = _email.message_from_string(
+        "From: a@b.c\r\nSubject: [Karamel] #123 . draft . a topic\r\n\r\nbody")
+    assert is_our_own_outgoing(ours), "a draft we sent is not a reply"
+
+    # A reply is a reply, whichever way the client marks it. Sender cannot
+    # decide this: the person answers from the address the drafts come from.
+    for hdrs in (
+        "From: a@b.c\r\nSubject: Re: [Karamel] #123 . draft . a topic\r\n",
+        "From: a@b.c\r\nSubject: RE: [Karamel] #123 x\r\n",
+        "From: a@b.c\r\nSubject: [Karamel] #123 x\r\nIn-Reply-To: <m@h>\r\n",
+    ):
+        m = _email.message_from_string(hdrs + "\r\nposted")
+        assert not is_our_own_outgoing(m), hdrs
 
 
 def selftest():
