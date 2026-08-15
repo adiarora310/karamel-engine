@@ -9,6 +9,7 @@ hard "do not" lines: the model returns SKIP for those.
 
 Flags: --force (skip window gate), --limit N (max candidates this run)
 """
+import os
 import re
 import sys
 import time
@@ -24,7 +25,6 @@ from safety import MAX_REPLIES_PER_DAY, reply_allowed, reply_count_today
 
 CANDIDATES = DATA / "candidates.jsonl"
 DRAFTS = DATA / "drafts.jsonl"
-VOICE_CARD = ROOT / "03_voice_card.md"
 EM_DASH = re.compile("[–—]")
 # Floor only. The real bound is max_age_minutes from config, the same setting
 # the listener captures against, because a drafter stricter than the listener
@@ -48,10 +48,13 @@ def max_candidate_age():
                    MIN_CANDIDATE_AGE_BOUND_MIN)
     except Exception:
         return MIN_CANDIDATE_AGE_BOUND_MIN
-# Whose budget and files this bills. Reads the owner of this installation
-# rather than a name compiled in: on a self-hosted copy the operator is not
-# called "adi", and hardcoding it billed their replies to a tenant that does not
-# exist on their machine while reading paths that are not theirs.
+
+
+# Fallback only, when neither --tenant nor KARAMEL_OWNER says otherwise. Reads
+# the owner of this installation rather than a name compiled in: on a
+# self-hosted copy the operator is not called "adi", and hardcoding it billed
+# their replies to a tenant that does not exist on their machine while reading
+# paths that are not theirs.
 TENANT = tenants.LEGACY_TENANT
 
 
@@ -133,11 +136,37 @@ def parse_response(out):
     )
 
 
+def resolve_tenant(argv=None):
+    """The tenant this run is for, honouring --tenant.
+
+    This file took its tenant from a module constant and ignored the flag
+    entirely, so `--tenant X` was accepted and silently discarded, and the voice
+    card came from a hardcoded repo-root path that no install has ever written
+    to. Every fresh install therefore died here with FileNotFoundError on
+    03_voice_card.md the first time a candidate reached it: the reading half
+    could not produce a single reply draft on a machine set up from the
+    handoff, which is the same repo-root-versus-data/voice_cards mismatch that
+    was fixed in handoff.py and never chased into this file."""
+    argv = sys.argv if argv is None else argv
+    tid = None
+    if "--tenant" in argv:
+        i = argv.index("--tenant") + 1
+        if i < len(argv):
+            tid = argv[i]
+    tid = tid or os.environ.get("KARAMEL_OWNER") or TENANT
+    return tenants.load_tenant(tid)
+
+
 def main():
     force = "--force" in sys.argv
     limit = None
     if "--limit" in sys.argv:
-        limit = int(sys.argv[sys.argv.index("--limit") + 1])
+        i = sys.argv.index("--limit") + 1
+        if i < len(sys.argv):
+            try:
+                limit = int(sys.argv[i])
+            except ValueError:
+                limit = None
 
     if is_paused():
         print("paused/halted, exiting")
@@ -146,11 +175,17 @@ def main():
         print("outside posting window, exiting")
         return 0
 
+    tenant = resolve_tenant()
+    if tenant is None:
+        print(f"no such tenant: {TENANT}", file=sys.stderr)
+        return 1
+    tid = tenant.id
+
     # Same gate the listener and notifier consult. Drafting past a closed gate
     # only builds a backlog that can never be pushed, at one claude -p call each.
-    gate_ok, gate_why = reply_allowed(TENANT)
+    gate_ok, gate_why = reply_allowed(tid)
     if not gate_ok:
-        print(f"reply gate closed for tenant '{TENANT}': {gate_why}")
+        print(f"reply gate closed for tenant '{tid}': {gate_why}")
         return 0
 
     drafted_ids = {r["tweet_id"] for r in read_jsonl(DRAFTS)}
@@ -176,7 +211,7 @@ def main():
     pending = fresh
 
     # Never draft more than can actually be sent today.
-    replies_left = MAX_REPLIES_PER_DAY - reply_count_today(TENANT)
+    replies_left = MAX_REPLIES_PER_DAY - reply_count_today(tid)
     if limit:
         replies_left = min(replies_left, limit)
     if len(pending) > replies_left:
@@ -187,7 +222,14 @@ def main():
         print("no undrafted candidates")
         return 0
 
-    voice = VOICE_CARD.read_text()
+    # The tenant's card, wherever their record says it lives. The install
+    # writes it to data/voice_cards/; the old constant pointed at the repo
+    # root, where nothing has ever put one.
+    card = tenant.voice_card_path
+    if not card.exists():
+        print(f"no voice card for '{tid}' at {card}", file=sys.stderr)
+        return 1
+    voice = card.read_text()
     drafted, skipped = 0, 0
 
     for cand in pending:
@@ -295,6 +337,23 @@ def selftest():
     finally:
         load_config = _saved
         karamel_common.load_config = real
+
+    # The card comes from the tenant record, never a module constant. A
+    # hardcoded repo-root path is what made every fresh install die here with
+    # FileNotFoundError the first time a candidate reached the drafter, because
+    # the bootstrap writes cards to data/voice_cards/.
+    assert "VOICE_CARD" not in globals(), \
+        "the voice card path belongs to the tenant, not to this module"
+    t = resolve_tenant(["drafter.py", "--tenant", tenants.LEGACY_TENANT])
+    if t is not None:
+        assert t.voice_card_path == t.voice_card_path, "must be tenant-derived"
+        assert str(t.voice_card_path).endswith(".md"), t.voice_card_path
+
+    # --tenant is honoured rather than accepted and discarded, which is what a
+    # module-level TENANT constant did to it.
+    if tenants.load_tenant(tenants.LEGACY_TENANT) is not None:
+        got = resolve_tenant(["drafter.py", "--tenant", tenants.LEGACY_TENANT])
+        assert got is not None and got.id == tenants.LEGACY_TENANT, got
 
     # Age is measured from now, not from discovery: a candidate that sat in the
     # file overnight still reports the age the listener saw.
