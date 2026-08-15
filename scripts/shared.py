@@ -281,36 +281,33 @@ def post_url(draft_text: str, in_reply_to: str | None = None) -> str:
     and pasting it, which is where stray quote marks and lost line breaks come
     from.
 
-    x.com/intent/post is the current spelling. twitter.com/intent/tweet still
-    redirects, but a link that visibly bounces through a retired domain looks
-    broken to the person clicking it."""
-    url = "https://x.com/intent/post?text=" + parse.quote(draft_text, safe="")
+    twitter.com/intent/tweet, NOT the newer x.com/intent/post spelling, and the
+    difference is not cosmetic. Tested on a signed-in iPhone opening these from
+    Gmail: twitter.com/intent/tweet is registered as a universal link and opens
+    the X app; x.com/intent/post is not, so it loads in Gmail's in-app browser,
+    which has its own cookie jar and no session, and shows a login wall to
+    somebody whose app is signed in one tap away.
+
+    This file briefly used the x.com spelling on the reasoning that a link
+    bouncing through a retired domain looks broken. It turned out to be the only
+    thing making the link work, so the old domain stays until Apple's
+    association file says otherwise. Retest with A/B links before changing it;
+    do not change it because one form looks more current."""
+    url = "https://twitter.com/intent/tweet?text=" + parse.quote(
+        draft_text, safe="")
     if in_reply_to:
         url += "&in_reply_to=" + parse.quote(str(in_reply_to), safe="")
     return url
-
-
-def app_post_url(draft_text: str) -> str:
-    """The same composer, as a URL scheme the installed X app answers.
-
-    An https link opened from Gmail on a phone lands in Gmail's own in-app
-    browser, which has its own cookie jar and no X session, so the person is
-    shown a login wall while their signed-in X app sits one tap away. The
-    universal link does not fire from inside that webview. A scheme link does:
-    iOS hands twitter:// straight to the app, session intact.
-
-    The scheme carries text only. There is no reply-threading parameter, which
-    is why replies keep the web intent and only originals lead with this."""
-    return "twitter://post?message=" + parse.quote(draft_text, safe="")
 
 
 def compose_url(tweet_id: str, draft_text: str) -> str:
     """Reply composer. Kept as its own name because notifier and drafter both
     call it and both store its output under a compose_url key.
 
-    Stays on the web intent even though it inherits the webview problem above:
-    in_reply_to is the only way to thread a reply, and a reply that posts as a
-    standalone tweet is worse than one that takes an extra tap to open."""
+    A twitter://post?message= scheme link was tried here and removed. It cannot
+    carry in_reply_to, so it would post a reply as a standalone tweet, and it
+    was not reported as tappable in Gmail at all: mail clients generally
+    linkify http(s) and leave unknown schemes as plain text."""
     return post_url(draft_text, in_reply_to=tweet_id)
 
 

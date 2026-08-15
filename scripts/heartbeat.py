@@ -38,7 +38,7 @@ import gen
 import llm
 import tenants
 from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
-from shared import app_post_url, post_url
+from shared import post_url
 
 # Seeds are evergreen and voice-neutral by design: they exist so the loop always
 # has something to chew on, not to be good posts. A tenant with real topics in
@@ -202,20 +202,18 @@ def format_draft(register, topic, text, scores, when, verifies=()):
     # a paragraph out of a mail client. Copying by hand is where smart quotes,
     # lost line breaks and a trailing "(gate {...})" come from.
     #
-    # The app link leads because these are read on a phone, in Gmail, whose
-    # in-app browser has its own cookie jar and no X session: the https link
-    # opens a login wall next to an X app that is already signed in. iOS hands
-    # twitter:// to the app directly. The web link stays for desktop, for
-    # Android, and for anyone whose app is not installed.
+    # One link, the twitter.com one, because that is the form that actually
+    # opens the signed-in app from Gmail on a phone. See post_url: the x.com
+    # spelling is not a registered universal link and lands in Gmail's own
+    # browser, which has no X session. A twitter:// scheme line was tried
+    # alongside it and removed: not tappable in Gmail, and redundant once the
+    # https link opens the app.
     #
-    # Both are deliberately absent when there are blanks to fill. A draft with a
+    # Deliberately absent when there are blanks to fill. A draft with a
     # [VERIFY: ...] slot is not postable, and handing someone a one-click post
     # button for it is handing them a way to publish a placeholder: the warning
     # at the top says stop, and a button underneath saying go would win.
-    open_line = ""
-    if not verifies:
-        open_line = (f"Post it (opens the X app): {app_post_url(text)}\n"
-                     f"In a browser instead: {post_url(text)}\n\n")
+    open_line = "" if verifies else f"Post it: {post_url(text)}\n\n"
 
     tail = (f"(gate {scores})\n\n"
             f"Reply to this email with one word:\n"
@@ -467,18 +465,19 @@ def selftest():
     # A link that opens the composer with the text already in it. Publishing
     # used to mean selecting a paragraph out of a mail client, which is where
     # smart quotes and lost line breaks come from.
-    assert "x.com/intent/post" in m, m
+    # twitter.com/intent/tweet, not x.com/intent/post. Verified by hand on a
+    # signed-in iPhone: only the twitter.com form is a registered universal
+    # link, so only it opens the app instead of a logged-out webview inside
+    # Gmail. This assertion exists because the x.com spelling looks more
+    # current and was changed to once already, which broke the link.
+    assert "twitter.com/intent/tweet" in m, m
+    assert "x.com/intent/post" not in m, \
+        "the x.com spelling is not a universal link and opens a login wall"
+    assert "twitter://" not in m, "the scheme link is not tappable in Gmail"
     assert "the%20post" in m, ("draft text must be url-encoded into the link", m)
     assert "in_reply_to" not in m, "an original is not a reply"
     assert m.index("the post") < m.index("Post it"), \
         "the draft comes before the button, so it is read before it is posted"
-
-    # The app scheme leads. These are read on a phone in Gmail, whose in-app
-    # browser has no X session, so the https link shows a login wall next to an
-    # app that is already signed in. iOS hands twitter:// to the app.
-    assert "twitter://post?message=" in m, m
-    assert m.index("twitter://") < m.index("https://x.com"), \
-        "the link that works on a phone goes first"
 
     # A draft with blanks says so BEFORE the text, not after it. Someone
     # skimming on a phone posts what they read first.
