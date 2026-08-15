@@ -345,6 +345,23 @@ def _feedback(verdict):
     if tells:
         listed = "; ".join(f'"{q}" ({t})' for q, t in tells[:6])
         parts.append(f"Remove these exact phrases and rewrite around them: {listed}.")
+        # Ban the construction, not only the sentence carrying it. Observed on a
+        # real run: three rounds, CLEAN 6 every time, two fresh tells each round
+        # and both of them "not-X-it's-Y" again. The maker was obeying exactly
+        # what it was told, deleting the quoted sentence and rebuilding the same
+        # pattern a paragraph away, so the score never moved. A quoted phrase is
+        # evidence of a habit; removing the evidence is not removing the habit.
+        kinds = []
+        for _, kind in tells[:6]:
+            kind = (kind or "").strip()
+            if kind and kind not in kinds:
+                kinds.append(kind)
+        if kinds:
+            parts.append(
+                "Do not write another instance of these patterns anywhere in "
+                "the draft: " + "; ".join(kinds) + ". Deleting the sentence and "
+                "rebuilding the same construction elsewhere is the failure "
+                "this is catching.")
     scores = verdict.get("scores") or {}
     below = [f"{a} scored {scores.get(a, 0)}, needs {THRESHOLDS[a]}"
              for a in AXES if scores.get(a, 0) < THRESHOLDS[a] and not (a == "CLEAN" and tells)]
@@ -538,6 +555,18 @@ def selftest():
                     "tells": [("Here is the thing", "throat-clearing")]})
     assert "Here is the thing" in fb, fb
     assert "CLEAN scored" not in fb, fb   # the quote replaces the useless number
+    # And the pattern by name, not just the sentence carrying it. Without this
+    # the maker deletes the quoted line and writes the same construction two
+    # sentences later, which is what three consecutive CLEAN 6 rounds looked
+    # like on a real run.
+    assert "throat-clearing" in fb, fb
+
+    # One prohibition per distinct pattern, however many phrases carried it.
+    fb2 = _feedback({"verdict": "FAIL", "fix": "none", "why": "",
+                     "scores": {"VOICE": 9, "TAKE": 9, "SPECIFIC": 9, "CLEAN": 6},
+                     "tells": [("not a product, a service", "not-X-it's-Y"),
+                               ("not taste, survival", "not-X-it's-Y")]})
+    assert fb2.count("not-X-it's-Y") == 3, fb2   # two quoted, named once
 
     # main()'s argument handling, which no selftest here ever touched. A
     # two-argument _arg call passed pyflakes and the whole suite, then raised
