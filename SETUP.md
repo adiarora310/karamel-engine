@@ -44,8 +44,12 @@ mkdir -p ~/.config/karamel && echo '{"provider": "cli"}' > ~/.config/karamel/llm
 
 Four questions. It checks the model works with a real call before asking you
 anything else, finds the voice card and asks you to confirm it, and connects
-Telegram or email. Telegram is quicker: no passwords, four taps in an app you
-already have.
+your email.
+
+Delivery is email. Telegram still works if a box already has it configured, and
+the code path is maintained, but new installs should not choose it: the reply
+loop, the weekly digest and the status page are all built and tested against
+email, and a Telegram tenant gets a thinner product for no benefit.
 
 ### See one before committing to anything
 
@@ -162,14 +166,27 @@ logged in. That Chrome must use its own profile directory, because Chrome 136
 and later refuse remote debugging on the default profile, and because you do
 not want your daily browser driven by anything.
 
+Use **your own tenant's port**, not the number below verbatim. Each tenant
+record carries a `cdp_port` and the listener attaches to that one. Opening
+Chrome on a different port is not a visible mistake: the listener attaches to
+nothing, fails, and calls `set_halt()`, which is the same flag a platform
+tripwire sets, so a typo here reads like enforcement. Print yours first:
+
 ```bash
-open -na "Google Chrome" --args --remote-debugging-port=9222 --user-data-dir="$HOME/.karamel-chrome-YOUR-TENANT-ID" --no-first-run --no-default-browser-check
+cd ~/karamel && PYTHONPATH=scripts python3 -c "import tenants,shared;print(tenants.load_tenant(shared.owner_id()).cdp_port)"
+```
+
+Then use it in both commands:
+
+```bash
+PORT=$(cd ~/karamel && PYTHONPATH=scripts python3 -c "import tenants,shared;print(tenants.load_tenant(shared.owner_id()).cdp_port)")
+open -na "Google Chrome" --args --remote-debugging-port=$PORT --user-data-dir="$HOME/.karamel-chrome-$(python3 -c 'import json,pathlib;print(json.load(open(pathlib.Path.home()/"karamel"/".karamel"))["owner"])')" --no-first-run --no-default-browser-check
 ```
 
 Log into X in that window. Leave it open and leave it signed in.
 
 ```bash
-curl -s http://localhost:9222/json/version
+curl -s http://localhost:$PORT/json/version
 ```
 
 If that answers, the listener can attach.
