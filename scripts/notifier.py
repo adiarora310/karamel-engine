@@ -151,6 +151,10 @@ def format_draft(draft: dict) -> str:
     return (
         f"Summary: Reply to {handle}\n\n"
         f"They posted: \"{original}\"\n\n"
+        # Labelled, unlike an original. The post being answered can run several
+        # paragraphs, so without this the reply reads as a continuation of the
+        # quote rather than as the thing being approved.
+        f"Here's your reply:\n\n"
         f"{draft_text}\n\n"
         f"Click on the link to post it: {url}\n\n"
         f"Reply to this email with one word or emoji:\n"
