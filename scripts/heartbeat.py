@@ -53,14 +53,33 @@ LEGACY_SEED_TOPICS = [
 ]
 
 
-def next_topics(limit, topic_queue, original_drafts, seeds=()):
-    """Topics to draft this run: queue entries first, then seeds, skipping any
-    topic already drafted (dedup against the draft log so it does not repeat).
+MAX_TOPIC_ATTEMPTS = 2
 
-    Both paths are arguments rather than module constants: dedup must be against
+
+def next_topics(limit, topic_queue, original_drafts, seeds=(), generated=None):
+    """Topics to draft this run: queue entries first, then seeds, skipping any
+    topic already drafted, and any topic that has failed the gate too often.
+
+    The paths are arguments rather than module constants: dedup must be against
     THIS tenant's history. Reading a shared draft log would let one tenant's
-    drafted topic silently suppress another's."""
+    drafted topic silently suppress another's.
+
+    Retiring failures is not an optimisation. original_drafts is only appended
+    after a draft is delivered, so a topic that fails the critic left no trace
+    and was picked again on the very next run, and the one after that. One hard
+    topic at the head of the queue therefore blocked every topic behind it,
+    twice a day, indefinitely: the machine looked healthy, burned two model
+    calls a run, and delivered nothing. Attempts are counted from the generated
+    log, which records failures with their topic, so a topic gets a second try
+    (scores move between runs) and is then set aside for the ones behind it."""
     done = {(r.get("topic") or "").strip().lower() for r in read_jsonl(original_drafts)}
+    if generated is not None:
+        attempts = {}
+        for r in read_jsonl(generated):
+            key = (r.get("topic") or "").strip().lower()
+            if key:
+                attempts[key] = attempts.get(key, 0) + 1
+        done |= {k for k, n in attempts.items() if n >= MAX_TOPIC_ATTEMPTS}
     pool = (read_jsonl(topic_queue) or []) + list(seeds)
     out, seen = [], set()
     for t in pool:
@@ -129,7 +148,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
     seeds = tenant.seed_topics or (LEGACY_SEED_TOPICS if tenant.is_legacy else [])
     n = tenant.originals_per_day if limit is None else limit
     topics = next_topics(n, tenant.topic_queue_path, tenant.original_drafts_path,
-                         seeds=seeds)
+                         seeds=seeds, generated=tenant.generated_path)
     if not topics:
         print(f"[{tenant.id}] no fresh topics "
               f"(queue empty, {len(seeds)} seed(s) configured)")
@@ -263,6 +282,30 @@ def selftest():
         # would have caused, and it would have looked like "no fresh topics".
         keys_b = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS)]
         assert "old topic" in keys_b, keys_b
+
+        # A topic that keeps failing the gate is retired, and the queue moves
+        # on. Without this it is picked again every run forever, because
+        # original_drafts is only written on delivery: one hard topic at the
+        # head of the queue starves every topic behind it, twice a day, and the
+        # only visible symptom is drafts quietly not arriving.
+        GEN = pathlib.Path("/gen")
+        attempts = {"n": 1}
+
+        def fake_read_gen(path):
+            if path == GEN:
+                return [{"topic": "old topic", "verdict": "FAIL"}] * attempts["n"]
+            return fake_read(path)
+
+        read_jsonl = fake_read_gen
+        keys_c = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS,
+                                                  generated=GEN)]
+        assert "old topic" in keys_c, ("one failure earns a retry", keys_c)
+
+        attempts["n"] = MAX_TOPIC_ATTEMPTS
+        keys_d = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS,
+                                                  generated=GEN)]
+        assert "old topic" not in keys_d, ("should be retired", keys_d)
+        assert "a seed topic" in keys_d, ("queue must advance", keys_d)
     finally:
         read_jsonl = _real
 
