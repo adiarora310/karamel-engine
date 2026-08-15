@@ -19,8 +19,14 @@ Two kinds of skip, kept separate:
   - status "skip"   = Karamel chose not to draft (targeting signal, pre-you).
   - status "skipped"= you hit the ❌ token (draft-quality signal).
 
+The report is not emailed. The weekly digest already ends with voice-card
+proposals, and two emails a week both saying "here is where your writing is
+drifting" is one more than anybody reads. The analysis still runs and the
+report is still written to data/reflections/, where the dashboard and anyone
+debugging can read it.
+
 Flags:
-  --print        stdout instead of Telegram
+  --print        stdout instead of writing artifacts
   --force        run even if paused/halted (reflection never touches X, so safe)
   --days N       lookback window in days (default 14)
   --min-edits N  minimum edited samples before proposing voice changes (default 5)
@@ -29,7 +35,6 @@ import re
 import sys
 from datetime import datetime, timedelta
 
-import channels
 import llm
 import tenants
 from karamel_common import (
@@ -318,7 +323,14 @@ def run_tenant(tenant, days=14, min_edits=5, do_print=False):
         print(f"\n===== {tenant.name} ({tenant.id}) =====")
         print(report)
     else:
-        channels.send(tenant, report, subject="[Karamel] your fortnightly read")
+        # No longer emailed. The weekly digest already ends with a section of
+        # voice-card proposals, and two emails a week both saying "here is what
+        # your writing is drifting toward" is one more than anybody reads.
+        #
+        # The analysis itself still runs, because it is the loop that makes the
+        # card sharpen against what somebody actually publishes, and the report
+        # is still written to disk where the dashboard and a person debugging
+        # can read it. Only the delivery is gone.
         write_artifacts(report, funnel, refinements, tenant=tenant)
 
     print(
