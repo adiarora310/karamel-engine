@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Karamel weekly digest. Aggregate the last 7 days of the reply loop
-(engagement + drafts) and the content engine (bangers, content ideas), write a
-markdown digest, deliver a summary, and propose voice-card refinements that the
-person confirms and nothing auto-applies.
+"""Karamel weekly digest. Aggregate the last 7 days of original posts and the
+reply loop, deliver it as plain text, and propose voice-card refinements that
+the person confirms and nothing auto-applies.
 
 No X access (reads local logs only), so it runs regardless of /halt.
 
@@ -24,10 +23,8 @@ from datetime import datetime, timezone, timedelta
 
 import channels
 import tenants
-from karamel_common import DATA, now_et, now_iso, read_jsonl
+from karamel_common import now_et, now_iso, read_jsonl
 
-BANGERS = DATA / "bangers.jsonl"
-IDEAS = DATA / "content_ideas.jsonl"
 EVERY_DAYS = 7
 
 
@@ -83,6 +80,12 @@ def _arg(flag, default=None, cast=str):
         return default
 
 
+def plural(n, suffix="s"):
+    """Accepts a count or anything with a length. "1 draft", "2 drafts"."""
+    n = n if isinstance(n, int) else len(n)
+    return "" if n == 1 else suffix
+
+
 def digest_dir(t):
     return t.data_dir / "weekly_digests"
 
@@ -126,14 +129,6 @@ def run_tenant(t, days=7, do_print=False, force=False):
 
     drafts = within(read_jsonl(t.drafts_path), since)
     eng = within(read_jsonl(t.engagement_path), since)
-    # Per tenant, like every other source here. These two stayed module-level
-    # through the multi-tenant rewrite, so on a shared box both digests reported
-    # whichever tenant's listener had filled the shared file, and the second
-    # person read the first person's activity as their own. data_dir resolves to
-    # DATA for the legacy tenant, so the existing files keep working.
-    bangers = within(read_jsonl(t.data_dir / "bangers.jsonl"), since)
-    ideas = within(read_jsonl(t.data_dir / "content_ideas.jsonl"), since)
-
     posted = [d for d in drafts if d.get("status") in ("posted_clean", "posted_edited")]
     edited = [d for d in drafts if d.get("status") == "posted_edited"]
     skipped = [d for d in drafts if d.get("status") in ("skip", "skipped")]
@@ -152,56 +147,85 @@ def run_tenant(t, days=7, do_print=False, force=False):
     gen_pass = [g for g in gen if g.get("verdict") == "PASS"]
 
     date = now_et().strftime("%Y-%m-%d")
+    span = f"{(datetime.now(timezone.utc) - timedelta(days=days)).strftime('%-d %B')} to {now_et().strftime('%-d %B')}"
+
+    # Plain text, in the same voice as the drafts. This used to be markdown,
+    # which nothing renders in a plain-text email, so a reader got literal #
+    # and ## characters down the left margin.
+    #
+    # The Content engine section is gone. It counted bangers.jsonl and
+    # content_ideas.jsonl, which are written by banger.py and
+    # content_prompter.py, and neither is in AGENTS_SPEC. Nothing schedules
+    # them, so the section reported zero every week for everyone: a line that
+    # can only ever say nothing happened teaches a reader to skim past the
+    # section that can.
     L = []
-    L.append(f"# Karamel weekly digest for {t.name}, {date}")
-    L.append(f"\nWindow: last {days} days. Generated {now_iso()}.\n")
-    L.append("## Original posts")
-    L.append(f"- Sent to you: {len(originals)}")
-    L.append(f"- You answered: {len(o_answered)}")
-    L.append(f"- You posted: {len(o_posted)}")
-    L.append(f"- Cleared the critic: {len(gen_pass)}/{len(gen)}")
-    L.append("\n## Reply loop")
-    L.append(f"- Drafts surfaced: {len(drafts)}")
-    L.append(f"- Posted: {len(posted)} ({len(edited)} edited)")
-    L.append(f"- Skipped: {len(skipped)}")
-    L.append(f"- Posted replies with 24h metrics: {len(evaluated)}")
+    L.append(f"Summary: Your week, {span}")
+    L.append("")
+    L.append("Original posts")
+    if originals:
+        L.append(f"You got {len(originals)} draft{plural(originals)}. "
+                 f"You answered {len(o_answered)} and posted {len(o_posted)}.")
+    else:
+        L.append("No drafts reached you this week.")
+    if gen:
+        L.append(f"Karamel wrote {len(gen)} and kept {len(gen_pass)}. "
+                 f"The rest failed its own gate before you saw them.")
+
+    L.append("")
+    L.append("Replies")
+    if drafts:
+        L.append(f"It drafted {len(drafts)}. You posted {len(posted)}, "
+                 f"edited {len(edited)} of those, and skipped {len(skipped)}.")
+    else:
+        L.append("No replies drafted this week.")
+    if evaluated:
+        L.append(f"{len(evaluated)} posted repl{'y' if len(evaluated) == 1 else 'ies'} "
+                 f"came back with 24 hour numbers.")
 
     if top:
-        L.append("\n### Top landings")
+        L.append("")
+        L.append("What landed best")
         for e in top:
             m = e["metrics_24h"]
-            L.append(f"- @{e.get('handle','?')} · {m.get('likes',0)}L / {m.get('replies',0)}R / {m.get('reposts',0)}RT")
-            L.append(f"  \"{(e.get('posted_text') or e.get('draft_text') or '')[:160]}\"")
+            L.append(f"@{e.get('handle','?')}, {m.get('likes',0)} likes, "
+                     f"{m.get('replies',0)} replies, {m.get('reposts',0)} reposts")
+            L.append(f'"{(e.get("posted_text") or e.get("draft_text") or "")[:160]}"')
 
     if skipped:
-        L.append("\n### Skip reasons (pattern check)")
         reasons = {}
         for d in skipped:
-            r = (d.get("skip_reason") or "unspecified")[:60]
+            r = (d.get("skip_reason") or "unspecified").strip()
             reasons[r] = reasons.get(r, 0) + 1
+        L.append("")
+        L.append("Why things were skipped")
         for r, c in sorted(reasons.items(), key=lambda x: -x[1])[:6]:
-            L.append(f"- {c}x  {r}")
+            L.append(f"{c}x  {r[:120]}")
 
-    L.append("\n## Content engine")
-    L.append(f"- Bangers surfaced: {len(bangers)}")
-    L.append(f"- Analytical thread ideas surfaced: {len(ideas)}")
-
-    # Voice-card refinement proposals. Heuristic, and never auto-applied: the
-    # person confirms. Addressed to whoever this digest is for, not to one
-    # hardcoded name, since this file now runs for every tenant on the box.
-    L.append(f"\n## Voice-card refinement proposals "
-             f"({t.name} confirms; nothing auto-applied)")
+    # Heuristic, and never auto-applied: the person confirms. A voice card that
+    # edits itself from one week of edits drifts fast.
     proposals = []
     if posted and edited and len(edited) / max(len(posted), 1) > 0.5:
-        proposals.append("You edited >50% of posted drafts. The drafter voice is drifting; worth a heavy-edit sample review to retune the voice card.")
+        proposals.append(
+            "You edited more than half of what you posted, so the voice is "
+            "drifting. Worth reading a few of your edits side by side with the "
+            "drafts to see what the card is getting wrong.")
     if evaluated and top:
-        proposals.append(f"Top landing pattern: lane-fit was {top[0].get('lane_fit')}. If this repeats 3+ weeks, bias the drafter toward it.")
+        proposals.append(
+            f"Your best reply this week sat in {top[0].get('lane_fit')}. "
+            f"If that repeats for three weeks it is worth leaning into.")
     if not evaluated:
-        proposals.append("No posted-reply metrics yet this week. Once you post + confirm with the X URL, the evaluator will start filling this in.")
+        proposals.append(
+            "No numbers on posted replies yet. They start arriving once you "
+            "post one and reply to the email with the X link.")
     if not proposals:
-        proposals.append("No strong patterns yet. Need more weeks of data.")
-    for p in proposals:
-        L.append(f"- {p}")
+        proposals.append("No clear patterns yet. It needs more weeks.")
+
+    L.append("")
+    L.append(f"What Karamel noticed, for you to confirm. Nothing here is "
+             f"applied on its own.")
+    for prop in proposals:
+        L.append(prop)
 
     digest = "\n".join(L)
 
@@ -216,7 +240,7 @@ def run_tenant(t, days=7, do_print=False, force=False):
 
     # The whole digest, not a teaser pointing at a file on a Mac they may not be
     # sitting at. It is a page of text once a week.
-    subject = f"[Karamel] weekly digest · {date}"
+    subject = "[Karamel] Your week in review!"
     try:
         channels.send(t, digest, subject=subject)
     except Exception as e:
