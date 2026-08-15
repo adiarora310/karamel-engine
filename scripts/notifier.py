@@ -111,36 +111,53 @@ def git_pull() -> None:
         )
 
 
-def format_age(minutes: int | float | None) -> str:
-    if minutes is None:
-        return "?"
-    m = int(minutes)
-    if m < 60:
-        return f"{m} min"
-    h = m // 60
-    return f"{h}h{m % 60:02d}m"
+def lane_label(draft) -> str:
+    """One of the voice card's four lanes, for the subject line.
+
+    lane_fit is free text from the model and reads like
+    "single-lane economy (media) with an entrepreneurship/distribution angle",
+    which is a useful note and an unreadable subject. This maps it back onto
+    the four canonical lanes by scanning for their names, first match winning,
+    so the reply subject says the same kind of thing an original's does."""
+    import heartbeat
+
+    blob = " ".join(draft.get("lane_fit") or []).lower()
+    for lane in heartbeat.LANES:
+        if lane.lower().replace(" ", "") in blob.replace("-", "").replace(" ", ""):
+            return lane
+    # Nothing recognisable: ask, rather than mislabel. Costs one short call and
+    # only on a draft already worth sending.
+    return heartbeat.classify_lane(
+        draft.get("original_text") or "", draft.get("draft_text") or "")
 
 
-def format_draft(idx: int, batch_total: int, draft: dict) -> str:
-    tier = draft.get("tier", "?")
-    handle = draft.get("handle", "?")
-    author = draft.get("author", "?")
-    age = format_age(draft.get("age_minutes"))
-    likes = draft.get("current_likes", draft.get("likes", "?"))
+def format_draft(draft: dict) -> str:
+    """The same shape as an original draft, plus the post being answered.
+
+    Tier, age, likes, lane-fit and the batch counter are gone. They are
+    operator diagnostics, every one of them is on the status page, and in an
+    email they were the first two lines a person read: a reply is judged on
+    what it answers and what it says.
+
+    The post being answered stays, because that is the one thing you cannot
+    judge the reply without, and opening X to find it defeats the point."""
+    handle = draft.get("handle") or "@" + str(draft.get("author_handle") or "?")
     original = (draft.get("original_text") or "").strip()
     draft_text = (draft.get("draft_text") or "").strip()
-    lane_fit = draft.get("lane_fit") or []
-    lane_str = " + ".join(lane_fit) if lane_fit else "(no tag)"
+    # Threaded, via in_reply_to. An original opens a blank composer; a reply
+    # that posts as a standalone tweet is a different thing entirely.
     url = compose_url(draft["tweet_id"], draft_text)
     did = draft.get("draft_id") or short_id(draft.get("tweet_id"))
     return (
-        f"#{did}  ({idx}/{batch_total})\n"
-        f"[Tier {tier}]  {handle} ({author})  {age} old  ·  {likes}L\n\n"
-        f"Original: \"{original}\"\n\n"
-        f"Draft: \"{draft_text}\"\n\n"
-        f"Lane-fit: {lane_str}\n"
-        f"Compose: {url}\n\n"
-        f"Reply to this message: ✅ posted / ✏️ <edit> / ❌ skip"
+        f"Summary: Reply to {handle}\n\n"
+        f"They posted: \"{original}\"\n\n"
+        f"{draft_text}\n\n"
+        f"Click on the link to post it: {url}\n\n"
+        f"Reply to this email with one word or emoji:\n"
+        f"Posted or ✅: You published it as written.\n"
+        f"Skip or ❌: You binned it.\n"
+        f"Edited or ✏️: Followed by what you actually posted.\n\n"
+        f"Draft #{did}"
     )
 
 
@@ -280,16 +297,21 @@ def main() -> int:
     sent_count = 0
     for k, i in enumerate(accepted, start=1):
         draft = rows[i]
-        # assign draft_id if missing
+        # assign draft_id if missing. Drafter-written rows already carry a
+        # millisecond timestamp; this only fires for a row from somewhere else,
+        # and a short id here cannot be recovered from the body of a reply,
+        # because DRAFT_ID_RE wants ten digits or more.
         if not draft.get("draft_id"):
             draft["draft_id"] = short_id(draft.get("tweet_id"))
-        text = format_draft(k, n, draft)
+        text = format_draft(draft)
         if has_em_dash(text):
             print(f"ABORT row {i}: em-dash in formatted message", file=sys.stderr)
             continue
+        # The lane, not the handle and not the id. Same shape as an original,
+        # and the id now rides on the last line of the body instead.
         msg_id = _deliver(tenant, text,
-                          subject=f"[Karamel] #{draft['draft_id']} · reply to "
-                                  f"@{draft.get('author_handle', '?')}")
+                          subject=f"[Karamel] Your reply is ready to post! "
+                                  f"{lane_label(draft)}")
         if msg_id is None:
             print(f"row {i}: send failed", file=sys.stderr)
             continue
