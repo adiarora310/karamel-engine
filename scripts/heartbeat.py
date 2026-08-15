@@ -37,7 +37,7 @@ import critic
 import gen
 import tenants
 from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
-from shared import post_url
+from shared import app_post_url, post_url
 
 # Seeds are evergreen and voice-neutral by design: they exist so the loop always
 # has something to chew on, not to be good posts. A tenant with real topics in
@@ -124,11 +124,20 @@ def format_draft(register, topic, text, scores, when, verifies=()):
     # a paragraph out of a mail client. Copying by hand is where smart quotes,
     # lost line breaks and a trailing "(gate {...})" come from.
     #
-    # Deliberately absent when there are blanks to fill. A draft with a
+    # The app link leads because these are read on a phone, in Gmail, whose
+    # in-app browser has its own cookie jar and no X session: the https link
+    # opens a login wall next to an X app that is already signed in. iOS hands
+    # twitter:// to the app directly. The web link stays for desktop, for
+    # Android, and for anyone whose app is not installed.
+    #
+    # Both are deliberately absent when there are blanks to fill. A draft with a
     # [VERIFY: ...] slot is not postable, and handing someone a one-click post
     # button for it is handing them a way to publish a placeholder: the warning
     # at the top says stop, and a button underneath saying go would win.
-    open_line = "" if verifies else f"Post it: {post_url(text)}\n\n"
+    open_line = ""
+    if not verifies:
+        open_line = (f"Post it (opens the X app): {app_post_url(text)}\n"
+                     f"In a browser instead: {post_url(text)}\n\n")
 
     tail = (f"(gate {scores})\n\n"
             f"Reply to this email with one word:\n"
@@ -368,8 +377,15 @@ def selftest():
     assert "x.com/intent/post" in m, m
     assert "the%20post" in m, ("draft text must be url-encoded into the link", m)
     assert "in_reply_to" not in m, "an original is not a reply"
-    assert m.index("the post") < m.index("Post it:"), \
+    assert m.index("the post") < m.index("Post it"), \
         "the draft comes before the button, so it is read before it is posted"
+
+    # The app scheme leads. These are read on a phone in Gmail, whose in-app
+    # browser has no X session, so the https link shows a login wall next to an
+    # app that is already signed in. iOS hands twitter:// to the app.
+    assert "twitter://post?message=" in m, m
+    assert m.index("twitter://") < m.index("https://x.com"), \
+        "the link that works on a phone goes first"
 
     # A draft with blanks says so BEFORE the text, not after it. Someone
     # skimming on a phone posts what they read first.
@@ -381,7 +397,7 @@ def selftest():
     assert "✅" not in v, "a draft with blanks must not be one-tap postable"
     # Including the composer link. The warning at the top says stop; a button
     # underneath saying go would win, and what gets published is a placeholder.
-    assert "intent/post" not in v, \
+    assert "intent/post" not in v and "twitter://" not in v, \
         "a draft with unfilled blanks must not be one click from publication"
     assert "edited" in v, v
     assert "✏️" not in v, "emoji instruction is a Telegram-era leftover"
