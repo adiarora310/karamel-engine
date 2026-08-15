@@ -179,18 +179,65 @@ def refill_topics(tenant, voice, seeds=(), want=REFILL_COUNT):
     return len(fresh)
 
 
-def format_draft(register, topic, text, scores, when, verifies=()):
+# The four lanes from the voice card, and the vocabulary the reply drafter
+# already matches against as LANE_FIT. Used in the subject so the inbox says
+# what a draft is about before it is opened.
+LANES = ("Pop culture", "Economy", "Investing", "Entrepreneurship")
+
+
+def sentence_case(s):
+    """Capitalise the first letter and leave the rest alone.
+
+    Not title case: topics are written as sentences and carry proper nouns
+    already, so upper-casing every word turns "the Lakers roster math" into
+    something that reads like a headline generator."""
+    s = (s or "").strip()
+    return s[:1].upper() + s[1:] if s else s
+
+
+def classify_lane(topic, text, tenant=None):
+    """Which lane this draft belongs to. Falls back rather than failing.
+
+    One short model call on a draft that has already cleared the gate, so it
+    runs for roughly half of what is written and never for something nobody
+    will see. A subject line is not worth failing a delivery over, so anything
+    unexpected returns the first lane rather than raising."""
+    import llm
+
+    prompt = (
+        "Classify this post into exactly one lane. Reply with the lane name "
+        "and nothing else.\n\nLanes:\n"
+        + "\n".join(f"- {l}" for l in LANES)
+        + f"\n\nTopic: {topic}\n\nPost:\n{text}\n"
+    )
+    try:
+        out = (llm.complete(prompt, label="lane", tenant=(tenant.id if tenant else None))
+               or "").strip()
+    except Exception:
+        return LANES[0]
+    low = out.lower()
+    for lane in LANES:
+        if lane.lower() in low:
+            return lane
+    return LANES[0]
+
+
+def format_draft(register, topic, text, scores, when, verifies=(), draft_id=None):
     """`when` is the tenant's local time, not the server's. One Mac serves
     people in several zones, and a draft stamped 6am for someone in London is
-    a draft they will not trust."""
-    head = f"[KARAMEL DRAFT, {register}, {when.strftime('%a %b %d %H:%M %Z')}]\n"
+    a draft they will not trust.
+
+    scores and register are no longer printed. The gate line read as raw Python
+    in the middle of an otherwise plain-English email, and both are still on the
+    row and on the status page for anyone debugging."""
+    head = ""
     if verifies:
-        # First line, before the draft. A slot buried mid-paragraph gets posted
+        # First, before the draft. A slot buried mid-paragraph gets posted
         # verbatim by someone skimming on a phone, and "[VERIFY: ...]" in a live
         # post is worse than the draft never having been sent.
         asks = "\n".join(f"  {i}. {v}" for i, v in enumerate(verifies, 1))
-        head = (f"⚠️ NOT READY TO POST, {len(verifies)} blank(s) to fill first:\n"
-                f"{asks}\n\n" + head)
+        head = (f"NOT READY TO POST. {len(verifies)} blank(s) to fill first:\n"
+                f"{asks}\n\n")
     # Words, not symbols. This started as ✅ ✏️ ❌ from the Telegram era, where a
     # reaction is one tap. On email somebody has to type it, and an emoji picker
     # is a worse ask than a word. Both still parse; the instruction names the
@@ -215,18 +262,23 @@ def format_draft(register, topic, text, scores, when, verifies=()):
     # at the top says stop, and a button underneath saying go would win.
     open_line = "" if verifies else f"Post it: {post_url(text)}\n\n"
 
-    tail = (f"(gate {scores})\n\n"
-            f"Reply to this email with one word:\n"
-            f"  posted   you published it as written\n"
-            f"  skip     you binned it\n"
-            f"or  edited  followed by what you actually posted.\n"
-            f"The quoted text below is ignored, so leave it.")
+    tail = ("Reply to this email with one word or emoji:\n"
+            "Posted ✅  You published it as written.\n"
+            "Skip ❌  You binned it.\n"
+            "Edited ✏️  Followed by what you actually posted.")
     if verifies:
-        tail = (f"(gate {scores})\n\n"
-                f"Fill the blank(s) above first, then reply with\n"
-                f"  edited   followed by the finished text\n"
-                f"so the posted version is what gets recorded.")
-    return head + f"Topic: {topic}\n\n{text}\n\n" + open_line + tail
+        tail = ("Fill the blank(s) above first, then reply:\n"
+                "Edited ✏️  Followed by the finished text,\n"
+                "so the version that gets recorded is the one you posted.")
+
+    # The id moved out of the subject and lives here. inbox.py reads it from
+    # the RAW body of a reply, before the quoted original is stripped, so it
+    # keeps working as the fallback for clients that drop In-Reply-To. Last
+    # line, because it is machinery rather than something to read.
+    footer = f"\n\nDraft #{draft_id}" if draft_id else ""
+
+    return (head + f"Summary: {sentence_case(topic)}\n\n{text}\n\n"
+            + open_line + tail + footer)
 
 
 def run_tenant(tenant, limit=None, force=False, dry=False):
@@ -304,10 +356,15 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
         draft_id = int(time.time() * 1000)
         msg = format_draft(
             t["register"], t["topic"], r["final"], r.get("scores", {}),
-            tenant.now(), verifies=verifies,
+            tenant.now(), verifies=verifies, draft_id=draft_id,
         )
-        flag = "ACTION NEEDED, blanks to fill" if verifies else "draft"
-        subject = f"[Karamel] #{draft_id} · {flag} · {t['topic'][:60]}"
+        # The lane, not the topic. A subject line is read in a list, where the
+        # useful thing is what this is about, and the whole topic never fits.
+        lane = classify_lane(t["topic"], r["final"], tenant)
+        if verifies:
+            subject = f"[Karamel] Your draft needs one detail first! {lane}"
+        else:
+            subject = f"[Karamel] Your draft is ready to post! {lane}"
         mid = channels.send(tenant, msg, dry=dry, subject=subject)
         delivered += 1
         if dry:
@@ -453,14 +510,33 @@ def selftest():
         read_jsonl = _real
 
     when = datetime(2026, 8, 10, 9, 30)
-    m = format_draft("banger", "T", "the post", {"TAKE": 9}, when)
-    # The reply instruction is words rather than symbols: on email somebody has
-    # to type it, and an emoji picker is a worse ask than a word.
-    assert "the post" in m and "T" in m, m
-    assert "posted" in m and "skip" in m and "edited" in m, m
-    assert "✅" not in m, "emoji instruction is a Telegram-era leftover"
-    assert "Aug 10" in m and "09:30" in m, m
+    m = format_draft("banger", "the lakers roster math", "the post",
+                     {"TAKE": 9}, when, draft_id=1786829000001)
+    assert "the post" in m, m
+    # Both spellings offered. The word is the easier ask on a phone, where an
+    # emoji picker is a worse prompt than typing five letters, and the parser
+    # has always accepted either.
+    assert "Posted" in m and "Skip" in m and "Edited" in m, m
+    assert "✅" in m and "❌" in m and "✏️" in m, m
     assert "NOT READY" not in m, "a clean draft must not carry the warning"
+
+    # Sentence case, not title case: topics are written as sentences and carry
+    # their own proper nouns, so upper-casing every word reads like a headline
+    # generator.
+    assert "Summary: The lakers roster math" in m, m
+    assert sentence_case("the Lakers roster math") == "The Lakers roster math"
+    assert sentence_case("") == "" and sentence_case(None) == ""
+
+    # The id moved out of the subject and into the last line of the body, so
+    # inbox.draft_id_from_body can still correlate a reply when a client drops
+    # In-Reply-To. Losing it entirely would make that failure silent.
+    assert "Draft #1786829000001" in m, m
+    assert m.rstrip().endswith("Draft #1786829000001"), m
+
+    # The gate scores no longer print. They read as raw Python in the middle of
+    # an otherwise plain-English email, and they are still on the row and the
+    # status page for anyone debugging.
+    assert "TAKE" not in m and "{" not in m, m
 
     # A link that opens the composer with the text already in it. Publishing
     # used to mean selecting a paragraph out of a mail client, which is where
@@ -491,8 +567,11 @@ def selftest():
     # underneath saying go would win, and what gets published is a placeholder.
     assert "intent/post" not in v and "twitter://" not in v, \
         "a draft with unfilled blanks must not be one click from publication"
-    assert "edited" in v, v
-    assert "✏️" not in v, "emoji instruction is a Telegram-era leftover"
+    # A blanks draft asks only for an edit: posting it as written would publish
+    # a placeholder, so the other two words are deliberately absent.
+    assert "Edited" in v and "✏️" in v, v
+    assert "Posted" not in v and "Skip" not in v, \
+        "a draft with blanks has only one sensible answer"
 
     # Topic refill. Nothing has ever written topic_queue.jsonl, so the seed
     # list was the whole supply and every install went silent once it ran out.

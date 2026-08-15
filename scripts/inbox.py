@@ -61,8 +61,17 @@ QUOTE_MARKERS = (
     re.compile(r"^\s*-{2,}\s*Original Message\s*-{2,}", re.IGNORECASE),
     re.compile(r"^\s*_{5,}\s*$"),
     re.compile(r"^\s*From:\s.+@", re.IGNORECASE),
+    # Our own lines. A client that quotes without ">" or an "On ... wrote:"
+    # banner would otherwise hand our instructions to the token parser, which
+    # lists all three words and would match whichever came first.
+    re.compile(r"^\s*Reply to this email with one word", re.IGNORECASE),
+    re.compile(r"^\s*Fill the blank\(s\) above first", re.IGNORECASE),
+    re.compile(r"^\s*Post it:\s*https?://", re.IGNORECASE),
+    re.compile(r"^\s*Draft #\d{6,}", re.IGNORECASE),
+    re.compile(r"^\s*NOT READY TO POST", re.IGNORECASE),
+    # The pre-2026-08 format. Kept because drafts already in the mailbox still
+    # carry it, and a reply to one of those must still parse.
     re.compile(r"^\s*\[KARAMEL DRAFT", re.IGNORECASE),
-    re.compile(r"^\s*⚠️ NOT READY TO POST", re.IGNORECASE),
 )
 SIGNATURE = re.compile(r"^--\s*$")
 
@@ -101,6 +110,26 @@ def sender_address(msg):
 def draft_id_from_subject(subject):
     m = DRAFT_ID_RE.search(subject or "")
     return int(m.group(1)) if m else None
+
+
+def draft_id_from_body(raw_body):
+    """The draft id out of the RAW body, quoted original included.
+
+    The id used to ride in the subject, which survives a reply untouched. It
+    now sits on the last line of the draft, so the only copy in a reply is
+    inside the quoted original, and strip_quoted deliberately cuts that away
+    before anything is parsed.
+
+    That cut must stay: our own email lists all three reply words, so parsing
+    past the quote would read our instructions back as the person's answer.
+    Correlation is a different question from intent, and it is safe to answer
+    from text that must never be read for tokens. So this reads the raw body,
+    and only ever for the id.
+
+    Last match wins: a thread accumulates quoted drafts, and the one being
+    answered is the most recent, which is the innermost and therefore last."""
+    ids = DRAFT_ID_RE.findall(raw_body or "")
+    return int(ids[-1]) if ids else None
 
 
 def body_text(msg):
@@ -216,15 +245,18 @@ def apply_reply(tenant, msg, dry=False):
         return f"ignored: {addr or '(no from)'} matches no tenant"
 
     subject = header(msg, "Subject")
-    reply_text = strip_quoted(body_text(msg))
+    raw_body = body_text(msg)
+    reply_text = strip_quoted(raw_body)
     status, edited_text, reply_url = poller.parse_reply_tokens(reply_text)
     if status is None:
         return (f"[{tenant.id}] unrecognised reply to {subject[:50]!r}: "
                 f"{reply_text[:60]!r}")
 
+    # Subject first for drafts sent before the id moved into the body, then
+    # the body, which is where it lives now.
     path, rows, i = locate_draft(
         tenant, header(msg, "In-Reply-To").strip() or None,
-        draft_id_from_subject(subject),
+        draft_id_from_subject(subject) or draft_id_from_body(raw_body),
     )
     if i is None:
         return f"[{tenant.id}] no matching draft for {subject[:60]!r}"
