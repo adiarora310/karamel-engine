@@ -152,6 +152,16 @@ def chrome_plist(owner):
     }
 
 
+def credentials_present():
+    """Whether a delivery channel is actually configured.
+
+    Both shapes count. Telegram is sunsetted for new installs but an existing
+    box still has telegram.json and nothing else, and telling that person their
+    credentials are missing sends them to re-do setup that is already done."""
+    return any((CONFIG / name).exists()
+               for name in ("email.json", "telegram.json"))
+
+
 def main():
     owner = "adi"
     if "--owner" in sys.argv:
@@ -159,6 +169,8 @@ def main():
         if i + 1 < len(sys.argv):
             owner = sys.argv[i + 1]
     dry = "--print" in sys.argv
+    # Set by ./karamel start, which loads the agents itself immediately after.
+    for_start = "--for-start" in sys.argv
 
     if not SCRIPTS.is_dir():
         print(f"no scripts/ beside {__file__}. Run this from inside a checkout.",
@@ -210,11 +222,25 @@ def main():
     # needs a human to log in anyway, so there is nothing here worth automating
     # at the cost of that failure mode.
 
+    # What to say next depends on who is reading, and both of these used to be
+    # printed unconditionally. ./karamel start calls this file and then loads
+    # eleven agents, so a new user watched it say "none loaded, load them one at
+    # a time" and "nothing will run until you add credentials" immediately
+    # before eleven components started against credentials written ninety
+    # seconds earlier. Every line was false by the time it finished scrolling,
+    # which is worse than unhelpful on the one screen someone reads closely.
+    if for_start:
+        print(f"\n{written} agent(s) written.")
+        return 0
+
     print(f"\n{written} agent(s) written, none loaded.")
     print("Load them one at a time, starting with the one that touches nothing:")
     print("  launchctl load ~/Library/LaunchAgents/com.karamel.heartbeat.plist")
-    print("\nNothing will run usefully until ~/.config/karamel/ has credentials.")
-    print("See SETUP.md.")
+    print("or let the CLI do it: ./karamel start")
+    if not credentials_present():
+        print("\nNothing will run usefully until ~/.config/karamel/ has "
+              "credentials.")
+        print("See SETUP.md.")
     return 0
 
 

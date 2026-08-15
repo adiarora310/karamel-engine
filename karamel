@@ -396,7 +396,8 @@ def cmd_start():
     if _clear_own_halt() is False:
         return 1
     rc = subprocess.run(
-        [sys.executable, str(ROOT / "deploy" / "install.py"), "--owner", owner],
+        [sys.executable, str(ROOT / "deploy" / "install.py"),
+         "--owner", owner, "--for-start"],
     ).returncode
     if rc != 0:
         return rc
