@@ -152,13 +152,30 @@ def chrome_plist(owner):
     }
 
 
+def config_dir():
+    """The directory the RUNTIME will read, which is not always this file's.
+
+    shared._config_dir() prefers ~/.config/karamel but falls back to the old
+    name when the new one is absent or empty, and CONFIG here is hardcoded to
+    the new name. Checking the wrong directory on a box that predates the rename
+    reports missing credentials to somebody whose system is working, which is
+    the same false alarm this warning was rewritten to stop producing."""
+    try:
+        sys.path.insert(0, str(SCRIPTS))
+        from shared import CONFIG_DIR
+        return CONFIG_DIR
+    except Exception:
+        return CONFIG
+
+
 def credentials_present():
     """Whether a delivery channel is actually configured.
 
     Both shapes count. Telegram is sunsetted for new installs but an existing
     box still has telegram.json and nothing else, and telling that person their
     credentials are missing sends them to re-do setup that is already done."""
-    return any((CONFIG / name).exists()
+    d = config_dir()
+    return any((d / name).exists()
                for name in ("email.json", "telegram.json"))
 
 
@@ -231,16 +248,24 @@ def main():
     # which is worse than unhelpful on the one screen someone reads closely.
     if for_start:
         print(f"\n{written} agent(s) written.")
-        return 0
+    else:
+        print(f"\n{written} agent(s) written, none loaded.")
+        print("Load them one at a time, starting with the one that touches "
+              "nothing:")
+        print("  launchctl load ~/Library/LaunchAgents/com.karamel.heartbeat.plist")
+        print("or let the CLI do it: ./karamel start")
 
-    print(f"\n{written} agent(s) written, none loaded.")
-    print("Load them one at a time, starting with the one that touches nothing:")
-    print("  launchctl load ~/Library/LaunchAgents/com.karamel.heartbeat.plist")
-    print("or let the CLI do it: ./karamel start")
+    # Printed in BOTH paths. The first version of this suppressed it under
+    # --for-start along with the manual instructions, which put it in exactly
+    # the place it was most needed: ./karamel start has no credentials check of
+    # its own and ends on "N running. Drafts will arrive twice a day.", so
+    # somebody who skipped setup was told everything was fine while every agent
+    # exited on missing credentials. Only the launchctl advice was contradictory
+    # when the CLI is the caller; this never was.
     if not credentials_present():
-        print("\nNothing will run usefully until ~/.config/karamel/ has "
+        print(f"\nNothing will run usefully until {config_dir()} has "
               "credentials.")
-        print("See SETUP.md.")
+        print("Run ./karamel setup, or see SETUP.md.")
     return 0
 
 

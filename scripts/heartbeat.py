@@ -77,7 +77,13 @@ def next_topics(limit, topic_queue, original_drafts, seeds=(), generated=None):
         attempts = {}
         for r in read_jsonl(generated):
             key = (r.get("topic") or "").strip().lower()
-            if key:
+            # Failures only. Counting every row retires a topic that CLEARED the
+            # gate and then failed to send: channels.send is unguarded, so an
+            # SMTP outage across two runs would discard the draft and the topic
+            # with it, permanently, for a reason that has nothing to do with the
+            # writing. A row with no verdict at all is not evidence of anything
+            # and must not count either.
+            if key and r.get("verdict") not in (None, "", "PASS"):
                 attempts[key] = attempts.get(key, 0) + 1
         done |= {k for k, n in attempts.items() if n >= MAX_TOPIC_ATTEMPTS}
     pool = (read_jsonl(topic_queue) or []) + list(seeds)
@@ -306,6 +312,32 @@ def selftest():
                                                   generated=GEN)]
         assert "old topic" not in keys_d, ("should be retired", keys_d)
         assert "a seed topic" in keys_d, ("queue must advance", keys_d)
+
+        # A topic that CLEARED the gate is never retired by attempt count, no
+        # matter how many rows it has. generate_gated logs before the send, and
+        # the send is unguarded, so counting passes would discard good writing
+        # because the mail server was down twice. It is delivery that retires a
+        # topic, via original_drafts, and delivery is the thing that failed.
+        def read_passes(path):
+            if path == GEN:
+                return [{"topic": "old topic", "verdict": "PASS"}] * 5
+            return fake_read(path)
+
+        read_jsonl = read_passes
+        keys_e = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS,
+                                                  generated=GEN)]
+        assert "old topic" in keys_e, ("passes must not retire", keys_e)
+
+        # Nor do rows with no verdict, which are evidence of nothing.
+        def read_blank(path):
+            if path == GEN:
+                return [{"topic": "old topic"}] * 5
+            return fake_read(path)
+
+        read_jsonl = read_blank
+        keys_f = [t["topic"] for t in next_topics(5, QUEUE_B, DRAFTS_B, SEEDS,
+                                                  generated=GEN)]
+        assert "old topic" in keys_f, ("verdictless rows must not retire", keys_f)
     finally:
         read_jsonl = _real
 
