@@ -44,7 +44,11 @@ AGENTS_SPEC = {
     "drafter": ("drafter.py", [], 1200),
     "notifier": ("notifier.py", [], 1200),
     "inbox": ("inbox.py", ["--once"], 300),
-    "weekly-digester": ("weekly_digester.py", [], [(18, 0)]),
+    # --all, and daily rather than weekly, for the same two reasons reflector
+    # takes --all: a digest for one person on a shared box silently drops
+    # everybody else, and the weekly gate lives in the script's watermark so a
+    # Mac asleep at 18:00 delivers on wake instead of losing the week.
+    "weekly-digester": ("weekly_digester.py", ["--all"], [(18, 0)]),
     # Every tenant, not just the owner of the box. This is the loop that makes a
     # voice card sharpen toward what someone actually publishes; running it for
     # one person on a multi-tenant install means everybody else's answers are

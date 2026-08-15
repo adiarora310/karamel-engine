@@ -4,7 +4,7 @@ keep. It never posts anything.
 
     ./karamel setup     answer a few questions, once
     ./karamel start     run it from now on
-    ./karamel draft     make one right now and show me
+    ./karamel draft     make one right now and email it to me
     ./karamel status    is it working
     ./karamel dashboard a page showing what it has done and what is next
     ./karamel token     the password for that page, when it is not local
@@ -329,13 +329,31 @@ def _owner():
 
 
 def cmd_draft():
+    """Write one post and send it, the way a scheduled run would.
+
+    This used to pass --print unconditionally, which puts heartbeat in dry mode:
+    channels.send routes to stdout, the delivery row is never appended, and the
+    draft exists only in whatever terminal happened to be open. The install's
+    last step calls this and says "writing one draft to show you", so a new user
+    was told to expect an email, got none, and then read "0 drafts sent to you"
+    on their status page. All three were telling the truth about a draft that
+    was never sent. Print-only is still available, but it has to be asked for.
+    """
     owner = _owner()
     os.environ["KARAMEL_OWNER"] = owner
-    say(f"Drafting one post for {owner}. This takes a minute or two.")
+    dry = "--print" in sys.argv or "--dry" in sys.argv
+    if dry:
+        say(f"Drafting one post for {owner}, print only, nothing will be sent.")
+    else:
+        say(f"Drafting one post for {owner}. This takes a minute or two.")
+        say("It will arrive by email when it clears the critic.")
     say()
+    args = [sys.executable, str(ROOT / "scripts" / "heartbeat.py"),
+            "--tenant", owner, "--force", "--limit", "1"]
+    if dry:
+        args.append("--print")
     return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "heartbeat.py"),
-         "--tenant", owner, "--print", "--force", "--limit", "1"],
+        args,
         env={**os.environ, "PYTHONPATH": str(ROOT / "scripts"),
              "KARAMEL_HOME": str(ROOT)},
     ).returncode
@@ -384,7 +402,12 @@ def cmd_start():
         return rc
     agents = Path.home() / "Library" / "LaunchAgents"
     loaded = 0
-    for label in (("heartbeat", "reflector", "doctor", "updater", "dashboard")
+    # weekly-digester belongs here and was missing, so install.py wrote its
+    # plist and nothing ever loaded it. An unloaded agent produces no log, no
+    # error and no exit code, which is why it stayed invisible: the component
+    # had never run once, on any install, for anybody.
+    for label in (("heartbeat", "reflector", "doctor", "updater", "dashboard",
+                   "weekly-digester")
                   + _reply_agents() + _reading_agents()):
         p = agents / f"com.karamel.{label}.plist"
         if not p.exists():

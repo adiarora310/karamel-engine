@@ -136,6 +136,11 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
         "topic": topic, "register": register, "final": final,
         "verdict": verdict["verdict"], "scores": verdict.get("scores", {}),
         "rounds": rounds, "journey": journey, "generated_at": now_iso(),
+        # Whose voice this was written in. Every other artefact carries it and
+        # this one did not, so a row read back off disk could not be attributed
+        # to anybody: fine while each person owns a Mac, wrong the moment two
+        # share one, and the operator view is exactly where that would surface.
+        "tenant": tenant,
     }
     if log:
         append_jsonl(generated_path or GENERATED, result)

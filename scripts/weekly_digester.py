@@ -1,22 +1,34 @@
 #!/usr/bin/env python3
-"""Karamel weekly digester: Sunday 6pm ET. Aggregate the last 7 days of the
-reply loop (engagement.jsonl + drafts.jsonl) and the content engine
-(bangers.jsonl, content_ideas.jsonl). Produce a digest markdown + a Telegram
-summary, and propose voice-card refinements (Adi confirms, never auto-applied).
+"""Karamel weekly digest. Aggregate the last 7 days of the reply loop
+(engagement + drafts) and the content engine (bangers, content ideas), write a
+markdown digest, deliver a summary, and propose voice-card refinements that the
+person confirms and nothing auto-applies.
 
 No X access (reads local logs only), so it runs regardless of /halt.
-Flags: --print (stdout only, no file/Telegram), --days N (default 7)
+
+Fires daily and delivers weekly, gated on when it last delivered rather than on
+the day of the week. The plist asks for 18:00; if the Mac is asleep at 18:00 on
+a Sunday, launchd runs the missed job on wake, and a weekday check would then
+look at Monday and skip the week entirely. A watermark cannot lose a week that
+way, only move it later.
+
+Flags:
+  --all            every registered tenant
+  --tenant ID      one tenant
+  --print          stdout only: no file, no delivery, no watermark
+  --force          deliver even if the last one was less than 7 days ago
+  --days N         window to aggregate (default 7)
 """
-import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 
-from karamel_common import DATA, ROOT, now_et, now_iso, read_jsonl, send_telegram_if_configured
-from shared import DRAFTS, ENGAGEMENT
+import channels
+import tenants
+from karamel_common import DATA, now_et, now_iso, read_jsonl
 
 BANGERS = DATA / "bangers.jsonl"
 IDEAS = DATA / "content_ideas.jsonl"
-DIGEST_DIR = DATA / "weekly_digests"
+EVERY_DAYS = 7
 
 
 def parse_ts(row):
@@ -46,15 +58,42 @@ def score(e):
     return (m.get("likes") or 0) + 3 * (m.get("replies") or 0) + 2 * (m.get("reposts") or 0)
 
 
-def main():
-    do_print = "--print" in sys.argv
-    days = 7
-    if "--days" in sys.argv:
-        days = int(sys.argv[sys.argv.index("--days") + 1])
+def digest_dir(t):
+    return t.data_dir / "weekly_digests"
+
+
+def watermark(t):
+    return digest_dir(t) / ".last_delivered"
+
+
+def due(t, force=False):
+    """Whether a digest is owed. Never-delivered counts as due."""
+    if force:
+        return True, "forced"
+    p = watermark(t)
+    if not p.exists():
+        return True, "never delivered"
+    try:
+        last = datetime.fromisoformat(p.read_text().strip().replace("Z", "+00:00"))
+    except (ValueError, OSError):
+        return True, "unreadable watermark"
+    age = (datetime.now(timezone.utc) - last).days
+    if age >= EVERY_DAYS:
+        return True, f"{age} days since the last one"
+    return False, f"delivered {age} day(s) ago, next in {EVERY_DAYS - age}"
+
+
+def run_tenant(t, days=7, do_print=False, force=False):
+    if not do_print:
+        owed, why = due(t, force=force)
+        if not owed:
+            print(f"[{t.id}] skipped: {why}")
+            return 0
+
     since = datetime.now(timezone.utc) - timedelta(days=days)
 
-    drafts = within(read_jsonl(DRAFTS), since)
-    eng = within(read_jsonl(ENGAGEMENT), since)
+    drafts = within(read_jsonl(t.drafts_path), since)
+    eng = within(read_jsonl(t.engagement_path), since)
     bangers = within(read_jsonl(BANGERS), since)
     ideas = within(read_jsonl(IDEAS), since)
 
@@ -64,11 +103,27 @@ def main():
     evaluated = [e for e in eng if e.get("metrics_24h") and not (e["metrics_24h"] or {}).get("deleted")]
     top = sorted(evaluated, key=score, reverse=True)[:5]
 
+    # The original-post half. Reply mining is off unless somebody deliberately
+    # turns it on, so on a default install every number below this line is zero
+    # and a digest built only from the reply loop is a weekly email that says
+    # nothing happened during a week that produced fourteen drafts.
+    originals = within(read_jsonl(t.original_drafts_path), since)
+    o_answered = [d for d in originals if d.get("confirmed_ts")]
+    o_posted = [d for d in originals
+                if d.get("status") in ("posted_clean", "posted_edited")]
+    gen = within(read_jsonl(t.generated_path), since)
+    gen_pass = [g for g in gen if g.get("verdict") == "PASS"]
+
     date = now_et().strftime("%Y-%m-%d")
     L = []
-    L.append(f"# Karamel weekly digest, {date}")
+    L.append(f"# Karamel weekly digest for {t.name}, {date}")
     L.append(f"\nWindow: last {days} days. Generated {now_iso()}.\n")
-    L.append("## Reply loop")
+    L.append("## Original posts")
+    L.append(f"- Sent to you: {len(originals)}")
+    L.append(f"- You answered: {len(o_answered)}")
+    L.append(f"- You posted: {len(o_posted)}")
+    L.append(f"- Cleared the critic: {len(gen_pass)}/{len(gen)}")
+    L.append("\n## Reply loop")
     L.append(f"- Drafts surfaced: {len(drafts)}")
     L.append(f"- Posted: {len(posted)} ({len(edited)} edited)")
     L.append(f"- Skipped: {len(skipped)}")
@@ -94,8 +149,11 @@ def main():
     L.append(f"- Bangers surfaced: {len(bangers)}")
     L.append(f"- Analytical thread ideas surfaced: {len(ideas)}")
 
-    # Voice-card refinement proposals (heuristic; Adi confirms, never auto-applied)
-    L.append("\n## Voice-card refinement proposals (Adi confirms; nothing auto-applied)")
+    # Voice-card refinement proposals. Heuristic, and never auto-applied: the
+    # person confirms. Addressed to whoever this digest is for, not to one
+    # hardcoded name, since this file now runs for every tenant on the box.
+    L.append(f"\n## Voice-card refinement proposals "
+             f"({t.name} confirms; nothing auto-applied)")
     proposals = []
     if posted and edited and len(edited) / max(len(posted), 1) > 0.5:
         proposals.append("You edited >50% of posted drafts. The drafter voice is drifting; worth a heavy-edit sample review to retune the voice card.")
@@ -114,36 +172,108 @@ def main():
         print(digest)
         return 0
 
-    DIGEST_DIR.mkdir(parents=True, exist_ok=True)
-    path = DIGEST_DIR / f"{date}.md"
+    d = digest_dir(t)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{date}.md"
     path.write_text(digest)
 
-    summary = (
-        f"📊 Weekly digest {date}\n"
-        f"Replies: {len(posted)} posted ({len(edited)} edited), {len(skipped)} skipped, "
-        f"{len(evaluated)} with metrics\n"
-        f"Content: {len(bangers)} bangers, {len(ideas)} thread ideas\n"
-    )
-    if top:
-        m = top[0]["metrics_24h"]
-        summary += f"Top: @{top[0].get('handle','?')} {m.get('likes',0)}L/{m.get('replies',0)}R\n"
-    summary += f"Full digest written to data/weekly_digests/{date}.md"
-    send_telegram_if_configured(summary)
-
-    # best-effort: commit the digest so the fork chat can read it from the repo
+    # The whole digest, not a teaser pointing at a file on a Mac they may not be
+    # sitting at. It is a page of text once a week.
+    subject = f"[Karamel] weekly digest · {date}"
     try:
-        subprocess.run(["git", "-C", str(ROOT), "add", str(path)], check=False, capture_output=True, timeout=20)
-        subprocess.run(
-            ["git", "-C", str(ROOT), "-c", "user.name=Karamel", "-c", "user.email=karamel@localhost",
-             "commit", "-m", f"weekly digest {date}"],
-            check=False, capture_output=True, timeout=20,
-        )
-        subprocess.run(["git", "-C", str(ROOT), "push"], check=False, capture_output=True, timeout=30)
+        channels.send(t, digest, subject=subject)
     except Exception as e:
-        print(f"digest git push best-effort failed: {e}", file=sys.stderr)
+        # The digest is already on disk, so a delivery failure must not look
+        # like a successful week. Leave the watermark alone: not writing it is
+        # what makes the next run retry instead of skipping seven days.
+        print(f"[{t.id}] digest written to {path} but delivery failed: {e}",
+              file=sys.stderr)
+        return 1
 
-    print(f"done: digest written to {path}")
+    watermark(t).write_text(now_iso())
+    print(f"[{t.id}] digest delivered and written to {path}")
     return 0
+
+
+def main():
+    if "--selftest" in sys.argv:
+        selftest()
+        return 0
+    do_print = "--print" in sys.argv
+    force = "--force" in sys.argv
+    days = 7
+    if "--days" in sys.argv:
+        days = int(sys.argv[sys.argv.index("--days") + 1])
+
+    if "--all" in sys.argv:
+        ids = [t.id for t in tenants.list_tenants()]
+        if not ids:
+            ids = [tenants.LEGACY_TENANT]
+    elif "--tenant" in sys.argv:
+        ids = [sys.argv[sys.argv.index("--tenant") + 1]]
+    else:
+        ids = [tenants.LEGACY_TENANT]
+
+    rc = 0
+    for tid in ids:
+        t = tenants.load_tenant(tid)
+        if t is None:
+            print(f"no such tenant: {tid}", file=sys.stderr)
+            rc = 1
+            continue
+        rc = run_tenant(t, days=days, do_print=do_print, force=force) or rc
+    return rc
+
+
+def selftest():
+    import tempfile, types
+    from pathlib import Path
+
+    # due() is the whole weekly gate, and the failure that matters is a missed
+    # week rather than an early one: a Mac asleep at 18:00 must still deliver on
+    # wake. Never-delivered and unreadable both have to read as due, because the
+    # alternative is a component that silently never runs -- which is the exact
+    # bug this file is being fixed for.
+    with tempfile.TemporaryDirectory() as d:
+        t = types.SimpleNamespace(id="x", data_dir=Path(d))
+        owed, why = due(t)
+        assert owed and "never" in why, (owed, why)
+
+        digest_dir(t).mkdir(parents=True, exist_ok=True)
+        watermark(t).write_text(
+            (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+        owed, why = due(t)
+        assert not owed, why
+        assert due(t, force=True)[0], "--force must override the watermark"
+
+        watermark(t).write_text(
+            (datetime.now(timezone.utc) - timedelta(days=9)).isoformat())
+        assert due(t)[0], "nine days must be due"
+
+        watermark(t).write_text("not a timestamp")
+        owed, why = due(t)
+        assert owed and "unreadable" in why, (owed, why)
+
+    # It runs daily and delivers weekly only while nothing re-introduces a
+    # weekday check, which would drop any week whose Sunday the Mac slept
+    # through. Matched against calls, not prose, so the comment explaining the
+    # decision does not trip the check that enforces it.
+    # Tokens are assembled rather than written out, so this check does not match
+    # itself. Spelled literally, the assertion is the only thing that fails it.
+    src = Path(__file__).read_text()
+    day_calls = (".week" + "day()", "iso" + "week" + "day")
+    assert not any(c in src for c in day_calls), \
+        "gate on the watermark, not the day of the week"
+    # A git tail here creates local commits in the user's clone, and updater.py
+    # is fast-forward-only and refuses a dirty tree: the first digest delivered
+    # on someone else's Mac would silently end their auto-updates forever.
+    # Checked against the module namespace rather than the source, because a
+    # source scan for these names matches the assertion that scans for them.
+    # Neither import is reachable here, so no shell-out is either.
+    assert "subprocess" not in globals(), \
+        "the digester must not shell out; a git tail here ends auto-updates"
+    assert "os" not in globals(), "no os either, for the same reason"
+    print("weekly_digester selftest: all assertions passed")
 
 
 if __name__ == "__main__":
