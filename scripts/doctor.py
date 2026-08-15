@@ -394,20 +394,60 @@ def mark_alerted(state, key, now=None):
     state.setdefault("alerted", {})[key] = now if now is not None else time.time()
 
 
-def build_alert(failures, stderr_by_log):
-    """The message an operator receives. Remedies included, because the message
-    arrives on a phone, hours later, with no terminal in front of it."""
-    lines = []
-    if failures:
-        lines.append("Karamel checks failing:")
-        for c in failures:
-            lines.append(f"  {c.name}: {c.detail}")
-            if c.remedy:
-                lines.append(f"    fix: {c.remedy}")
+def support_email():
+    """Who to forward a broken install to, or None.
+
+    Read from dashboard.json, which is already where share_with lives, rather
+    than compiled in. An address in the source would ship in the public package
+    to everyone who ever clones it, and it would be wrong on the operator's own
+    machine, where this email would tell them to forward it to themselves."""
+    try:
+        return json.loads((CONFIG_DIR / "dashboard.json").read_text()).get(
+            "support_email") or None
+    except Exception:
+        return None
+
+
+def build_alert(failures, stderr_by_log, support=None):
+    """The message someone receives when their install breaks.
+
+    Fixes first, detail underneath. This arrives on a phone, hours later, with
+    no terminal in front of it and usually to somebody who did not install this
+    and cannot read a stack trace. What they need in the first screen is the
+    one command that might fix it; what broke is context for whoever they
+    forward it to."""
+    lines = ["Oops, something doesn't look right."]
+
+    remedies = [c.remedy for c in failures if getattr(c, "remedy", "")]
+    lines.append("")
+    lines.append("Here's what you can do:")
+    if remedies:
+        # Deduplicated: several checks failing off one cause tend to name the
+        # same command, and three copies of it reads as three problems.
+        seen = []
+        for r in remedies:
+            if r not in seen:
+                seen.append(r)
+        for r in seen:
+            lines.append(f"  {r}")
+    else:
+        lines.append("  Nothing you can run will fix this one.")
+
+    lines.append("")
+    lines.append("What went wrong:")
+    for c in failures:
+        lines.append(f"  {c.name}: {c.detail}")
     for name, chunk in stderr_by_log.items():
         tail = chunk.strip().splitlines()[-6:]
-        lines.append(f"\n{name}:")
-        lines.extend(f"  {l[:200]}" for l in tail)
+        lines.append("")
+        lines.append(f"  {name}:")
+        lines.extend(f"    {l[:200]}" for l in tail)
+
+    if support:
+        lines.append("")
+        lines.append(f"If that does not fix it, forward this email to "
+                     f"{support} and we will fix it for you.")
+
     out = "\n".join(lines)
     return out[:MAX_ALERT_CHARS]
 
@@ -430,14 +470,14 @@ def watch(dry=False):
         print(f"watch: nothing new ({len(failures)} failing, all already reported)")
         return 0
 
-    msg = build_alert(fresh_fail, fresh_logs)
+    msg = build_alert(fresh_fail, fresh_logs, support=support_email())
     try:
         import channels
         import tenants
         t = tenants.load_tenant(_owner())
         if t is None:
             raise RuntimeError(f"no tenant {_owner()!r}")
-        channels.send(t, msg, dry=dry, subject="[Karamel] something needs a look")
+        channels.send(t, msg, dry=dry, subject="[Karamel] Oops, something doesn\'t look right...")
     except Exception as e:
         # The alert path itself failing is the one error that cannot be
         # delivered. Say it loudly on stdout, which launchd captures.
@@ -506,10 +546,38 @@ def selftest():
     c = Check("k", False, "d", "do this")
     assert c.to_dict()["remedy"] == "do this"
 
+    # Fixes first, detail underneath. This arrives on a phone, hours later, to
+    # somebody who did not install this and cannot read a stack trace: the first
+    # screen has to be the command that might fix it.
     msg = build_alert([Check("model key", False, "no key", "add one")],
                       {"drafter.err": "Traceback\nboom"})
-    assert "model key" in msg and "fix: add one" in msg and "boom" in msg, msg
+    assert msg.startswith("Oops, something doesn't look right."), msg
+    assert "model key" in msg and "add one" in msg and "boom" in msg, msg
+    assert msg.index("Here's what you can do") < msg.index("What went wrong"), \
+        "the fix comes before the diagnosis"
+    assert msg.index("add one") < msg.index("boom"), \
+        "a remedy must not sit below a stack trace"
     assert len(build_alert([], {"a.err": "x" * 5000})) <= MAX_ALERT_CHARS
+
+    # The forward line only when an address is configured. Compiling one in
+    # would ship a personal address to everyone who clones this, and on the
+    # operator's own machine it would say to forward the mail to themselves.
+    assert "forward this email" not in msg, msg
+    withsup = build_alert([Check("k", False, "d", "do this")], {},
+                          support="ops@example.com")
+    assert "forward this email to ops@example.com" in withsup, withsup
+    assert withsup.rstrip().endswith("we will fix it for you."), withsup
+
+    # Several checks failing off one cause name the same command; three copies
+    # of it reads as three separate problems.
+    dup = build_alert([Check("a", False, "x", "same fix"),
+                       Check("b", False, "y", "same fix")], {})
+    assert dup.count("same fix") == 1, dup
+
+    # A failure with no remedy still says something rather than leaving the
+    # section it promised empty.
+    none = build_alert([Check("a", False, "x", "")], {})
+    assert "Nothing you can run" in none, none
 
     # A shrunken log was rotated or truncated, and must be re-read from zero
     # rather than reported as "nothing new" forever after.
