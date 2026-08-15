@@ -35,6 +35,7 @@ import time
 import channels
 import critic
 import gen
+import llm
 import tenants
 from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
 from shared import app_post_url, post_url
@@ -99,6 +100,83 @@ def next_topics(limit, topic_queue, original_drafts, seeds=(), generated=None):
         if len(out) >= limit:
             break
     return out
+
+
+REFILL_COUNT = 6
+
+
+def used_topics(tenant, seeds=(), limit=40):
+    """Everything already drafted, attempted or queued, newest first.
+
+    Handed to the refill so it does not propose what the queue just retired,
+    which would spend a model call to rebuild the exact dead end it is being
+    called to escape."""
+    seen = []
+    for path in (tenant.original_drafts_path, tenant.generated_path,
+                 tenant.topic_queue_path):
+        for r in read_jsonl(path):
+            t = (r.get("topic") or "").strip()
+            if t and t not in seen:
+                seen.append(t)
+    for s in seeds:
+        t = (s.get("topic") or "").strip()
+        if t and t not in seen:
+            seen.append(t)
+    return seen[-limit:]
+
+
+def parse_topics(out):
+    """One topic per line, `register: topic`, tolerant of numbering and bullets.
+
+    Register defaults rather than failing: a malformed line that still names a
+    subject is worth keeping, because the alternative is an empty queue."""
+    topics = []
+    for line in (out or "").splitlines():
+        line = line.strip().lstrip("-*0123456789. )\t")
+        if not line:
+            continue
+        register, _, rest = line.partition(":")
+        register, rest = register.strip().lower(), rest.strip()
+        if rest and register in ("analytical", "banger", "personal"):
+            topics.append({"topic": rest, "register": register})
+        elif len(line) > 12:
+            topics.append({"topic": line, "register": "analytical"})
+    return topics
+
+
+def refill_topics(tenant, voice, seeds=(), want=REFILL_COUNT):
+    """Write fresh subjects into this tenant's queue. Returns how many.
+
+    Grounded in the voice card, because the point is subjects this person would
+    actually choose, and explicitly steered off everything already used."""
+    avoid = used_topics(tenant, seeds)
+    avoid_block = "\n".join(f"- {t}" for t in avoid) or "- (nothing yet)"
+    prompt = (
+        f"Here is a writer's voice card, between markers.\n\n"
+        f"=== VOICE CARD START ===\n{voice}\n=== VOICE CARD END ===\n\n"
+        f"Propose {want} subjects this person would write about on X. Their "
+        f"lanes, their obsessions, the arguments they are already having.\n\n"
+        f"Do NOT propose any of these, or anything that restates one:\n"
+        f"{avoid_block}\n\n"
+        f"Return exactly {want} lines, nothing else, each formatted:\n"
+        f"register: subject\n"
+        f"where register is analytical, banger or personal, and subject is a "
+        f"specific angle rather than a category. Not 'AI', but the particular "
+        f"claim about AI they would defend."
+    )
+    try:
+        out = llm.complete(prompt, label="topic-refill", tenant=tenant.id)
+    except Exception as e:
+        print(f"[{tenant.id}] topic refill failed: {e}", file=sys.stderr)
+        return 0
+
+    known = {t.lower() for t in avoid}
+    fresh = [t for t in parse_topics(out)
+             if t["topic"].lower() not in known][:want]
+    for t in fresh:
+        append_jsonl(tenant.topic_queue_path,
+                     {**t, "source": "refill", "added_at": now_iso()})
+    return len(fresh)
 
 
 def format_draft(register, topic, text, scores, when, verifies=()):
@@ -176,8 +254,23 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
     topics = next_topics(n, tenant.topic_queue_path, tenant.original_drafts_path,
                          seeds=seeds, generated=tenant.generated_path)
     if not topics:
+        # Refill, then look again. Nothing in this system has ever written
+        # topic_queue.jsonl: heartbeat reads it, tenants.py names it, and no
+        # producer exists, so the seed list was the entire supply. Seeds are
+        # finite and every run consumes one, so every install eventually
+        # reaches this line and goes quiet forever, reporting it to a launchd
+        # log nobody reads. Observed on the host: three seeds, two delivered,
+        # one retired after failing twice, silent the same afternoon.
+        added = refill_topics(tenant, voice, seeds=seeds)
+        if added:
+            print(f"[{tenant.id}] queue was empty, added {added} topic(s)")
+            topics = next_topics(n, tenant.topic_queue_path,
+                                 tenant.original_drafts_path, seeds=seeds,
+                                 generated=tenant.generated_path)
+    if not topics:
         print(f"[{tenant.id}] no fresh topics "
-              f"(queue empty, {len(seeds)} seed(s) configured)")
+              f"(queue empty, {len(seeds)} seed(s) configured, refill failed)",
+              file=sys.stderr)
         return 0
 
     delivered = 0
@@ -401,6 +494,46 @@ def selftest():
         "a draft with unfilled blanks must not be one click from publication"
     assert "edited" in v, v
     assert "✏️" not in v, "emoji instruction is a Telegram-era leftover"
+
+    # Topic refill. Nothing has ever written topic_queue.jsonl, so the seed
+    # list was the whole supply and every install went silent once it ran out.
+    got = parse_topics(
+        "analytical: why cap space is a narrative device\n"
+        "2. banger: the roster nobody wanted\n"
+        "- personal: what I got wrong about trades\n"
+        "\n"
+        "a bare line with no register at all\n"
+    )
+    assert [t["register"] for t in got] == [
+        "analytical", "banger", "personal", "analytical"], got
+    assert got[1]["topic"] == "the roster nobody wanted", got[1]
+    assert got[3]["topic"].startswith("a bare line"), got[3]
+
+    # Short noise is dropped rather than queued as a subject.
+    assert parse_topics("ok\n---\n") == [], parse_topics("ok\n---\n")
+
+    # A refill that proposes what the queue just retired rebuilds the dead end
+    # it was called to escape, so the exclusion list is not optional.
+    class _T:
+        id = "t"
+        original_drafts_path = pathlib.Path("/od")
+        generated_path = pathlib.Path("/gen2")
+        topic_queue_path = pathlib.Path("/tq")
+
+    def read_used(path):
+        if path == pathlib.Path("/od"):
+            return [{"topic": "delivered one"}]
+        if path == pathlib.Path("/gen2"):
+            return [{"topic": "failed twice"}]
+        return []
+
+    read_jsonl = read_used
+    try:
+        used = used_topics(_T(), seeds=[{"topic": "a seed"}])
+        assert "delivered one" in used and "failed twice" in used, used
+        assert "a seed" in used, "seeds are used topics too"
+    finally:
+        read_jsonl = _real
 
     print("heartbeat selftest: all assertions passed")
 
