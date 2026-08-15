@@ -58,6 +58,24 @@ def score(e):
     return (m.get("likes") or 0) + 3 * (m.get("replies") or 0) + 2 * (m.get("reposts") or 0)
 
 
+def _arg(flag, default=None, cast=str):
+    """Value after `flag`, or the default when it is absent, last, or unusable.
+
+    Bounds-checked because the bare sys.argv[index+1] form crashes with an
+    IndexError when the flag is typed without its value, and under launchd that
+    arrives as a traceback in a .err file rather than a message anyone can act
+    on. critic.py grew the same helper after the same mistake shipped there."""
+    if flag not in sys.argv:
+        return default
+    i = sys.argv.index(flag) + 1
+    if i >= len(sys.argv):
+        return default
+    try:
+        return cast(sys.argv[i])
+    except (TypeError, ValueError):
+        return default
+
+
 def digest_dir(t):
     return t.data_dir / "weekly_digests"
 
@@ -75,9 +93,16 @@ def due(t, force=False):
         return True, "never delivered"
     try:
         last = datetime.fromisoformat(p.read_text().strip().replace("Z", "+00:00"))
-    except (ValueError, OSError):
+        # Inside the guard, not after it. A timestamp with no offset parses
+        # perfectly and then raises TypeError on the subtraction below, which is
+        # not a ValueError and so escaped as an unhandled crash: the agent exits
+        # non-zero and no digest is ever delivered again. A watermark nobody can
+        # interpret means due, however it fails to be interpretable.
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - last).days
+    except (ValueError, OSError, TypeError):
         return True, "unreadable watermark"
-    age = (datetime.now(timezone.utc) - last).days
     if age >= EVERY_DAYS:
         return True, f"{age} days since the last one"
     return False, f"delivered {age} day(s) ago, next in {EVERY_DAYS - age}"
@@ -94,8 +119,13 @@ def run_tenant(t, days=7, do_print=False, force=False):
 
     drafts = within(read_jsonl(t.drafts_path), since)
     eng = within(read_jsonl(t.engagement_path), since)
-    bangers = within(read_jsonl(BANGERS), since)
-    ideas = within(read_jsonl(IDEAS), since)
+    # Per tenant, like every other source here. These two stayed module-level
+    # through the multi-tenant rewrite, so on a shared box both digests reported
+    # whichever tenant's listener had filled the shared file, and the second
+    # person read the first person's activity as their own. data_dir resolves to
+    # DATA for the legacy tenant, so the existing files keep working.
+    bangers = within(read_jsonl(t.data_dir / "bangers.jsonl"), since)
+    ideas = within(read_jsonl(t.data_dir / "content_ideas.jsonl"), since)
 
     posted = [d for d in drafts if d.get("status") in ("posted_clean", "posted_edited")]
     edited = [d for d in drafts if d.get("status") == "posted_edited"]
@@ -201,16 +231,18 @@ def main():
         return 0
     do_print = "--print" in sys.argv
     force = "--force" in sys.argv
-    days = 7
-    if "--days" in sys.argv:
-        days = int(sys.argv[sys.argv.index("--days") + 1])
+    days = _arg("--days", 7, cast=int)
 
     if "--all" in sys.argv:
         ids = [t.id for t in tenants.list_tenants()]
         if not ids:
             ids = [tenants.LEGACY_TENANT]
     elif "--tenant" in sys.argv:
-        ids = [sys.argv[sys.argv.index("--tenant") + 1]]
+        one = _arg("--tenant", None)
+        if one is None:
+            print("--tenant needs an id", file=sys.stderr)
+            return 2
+        ids = [one]
     else:
         ids = [tenants.LEGACY_TENANT]
 
@@ -253,6 +285,28 @@ def selftest():
         watermark(t).write_text("not a timestamp")
         owed, why = due(t)
         assert owed and "unreadable" in why, (owed, why)
+
+        # A naive timestamp parses fine and then blows up on the subtraction
+        # with TypeError, which is not a ValueError. Before this was folded into
+        # the guard it escaped as an unhandled crash and no digest was ever
+        # delivered again.
+        watermark(t).write_text("2026-01-01T00:00:00")
+        owed, _ = due(t)
+        assert owed, "a naive watermark must not raise"
+
+    # Flags typed without their value fall back instead of raising IndexError.
+    _real_argv = sys.argv
+    try:
+        sys.argv = ["weekly_digester.py", "--days"]
+        assert _arg("--days", 7, cast=int) == 7, "missing value -> default"
+        sys.argv = ["weekly_digester.py", "--days", "notanumber"]
+        assert _arg("--days", 7, cast=int) == 7, "uncastable -> default"
+        sys.argv = ["weekly_digester.py", "--days", "14"]
+        assert _arg("--days", 7, cast=int) == 14
+        sys.argv = ["weekly_digester.py", "--tenant"]
+        assert _arg("--tenant", None) is None, "missing id must not crash"
+    finally:
+        sys.argv = _real_argv
 
     # It runs daily and delivers weekly only while nothing re-introduces a
     # weekday check, which would drop any week whose Sunday the Mac slept
