@@ -156,6 +156,17 @@ class Tenant:
         # Lakers), so a second tenant with nothing queued would have received
         # drafts about another person's obsessions, in their own voice.
         self.seed_topics = data.get("seed_topics") or []
+        # Ignore the posting window: run at every hour of every day. Off unless
+        # a record asks for it, so it can never arrive by default on somebody
+        # else's install.
+        #
+        # For watching the loop run end to end without waiting for a Saturday to
+        # finish. It shifts the clock and nothing else: the halt, the daily read
+        # cap, the reply cap, the notifier's daily cap and both reply-mining
+        # gates all still apply, because those bound what the system may do
+        # rather than when it may do it. A flag that relaxed those would not be
+        # a testing convenience, it would be turning the safety rails off.
+        self.always_on = bool(data.get("always_on"))
         # --- reply-mining config. Only consulted when effective_reply_mining()
         # is True, which needs BOTH this tenant's flag and the code-level
         # allowlist in safety.py.
@@ -591,6 +602,19 @@ def selftest():
     # Ports are per tenant: one Chrome holds one person's X session.
     assert Tenant({"id": "z"}).cdp_port == 9222
     assert Tenant({"id": "z", "cdp_port": 9223}).cdp_port == 9223
+
+    # always_on is off unless a record asks for it, so it cannot arrive by
+    # default on somebody else's install.
+    assert Tenant({"id": "z"}).always_on is False
+    assert Tenant({"id": "z", "always_on": True}).always_on is True
+    assert Tenant({"id": "z", "always_on": False}).always_on is False
+
+    # It moves the clock and nothing else. These bound what the system may do
+    # rather than when, and a testing flag that relaxed them would be turning
+    # the safety rails off under a name that sounds like a schedule.
+    loud = Tenant({"id": "z", "always_on": True})
+    assert loud.reply_mining is False, "always_on must not open the reply gate"
+    assert loud.max_reads_per_day == 100, "always_on must not raise the read cap"
 
     print("tenants selftest: all assertions passed")
 

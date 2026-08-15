@@ -171,15 +171,18 @@ def main():
     if is_paused():
         print("paused/halted, exiting")
         return 0
-    if not force and not in_posting_window():
-        print("outside posting window, exiting")
-        return 0
 
+    # Resolved before the window check, not after: the window is per tenant now
+    # and this check used to run without knowing whose box it was on.
     tenant = resolve_tenant()
     if tenant is None:
         print(f"no such tenant: {TENANT}", file=sys.stderr)
         return 1
     tid = tenant.id
+
+    if not force and not in_posting_window(tenant=tenant):
+        print(f"[{tid}] outside posting window, exiting")
+        return 0
 
     # Same gate the listener and notifier consult. Drafting past a closed gate
     # only builds a backlog that can never be pushed, at one claude -p call each.

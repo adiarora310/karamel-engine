@@ -65,13 +65,25 @@ def load_config():
     return cfg
 
 
-def in_posting_window(dt=None):
+def in_posting_window(dt=None, tenant=None):
     """Mon-Fri 7am-9pm ET, Sun 4pm-9pm ET. Saturday is off entirely.
 
     The single source of truth for "is the system awake". notifier.
     skip_window_reason delegates here and only names the reason, so the two
     cannot disagree. They did for months: its Sunday branch had no upper bound.
+
+    A tenant carrying always_on is awake at every hour of every day. It exists
+    so one person can watch the whole loop run repeatedly instead of waiting for
+    a Saturday to end, and it is per tenant rather than a global edit so that
+    turning it on for the operator cannot quietly turn it on for everyone else.
+
+    It moves ONLY the clock. The halt, the daily read cap, the reply cap, the
+    notifier's daily cap and both reply-mining gates are untouched, because they
+    are what bound behaviour rather than schedule it. Read with getattr so this
+    file keeps knowing nothing about the tenant module.
     """
+    if tenant is not None and getattr(tenant, "always_on", False):
+        return True
     dt = dt or now_et()
     wd, hr = dt.weekday(), dt.hour  # Mon=0 .. Sun=6
     if wd <= 4:

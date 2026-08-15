@@ -36,7 +36,7 @@ DAILY_CAP = 50   # Telegram messages/day. NOT a reply cap: see below.
 TENANT = tenants.LEGACY_TENANT
 
 
-def skip_window_reason(dt=None) -> str | None:
+def skip_window_reason(dt=None, tenant=None) -> str | None:
     """Why the notifier should stay quiet, or None to send. `dt` is an ET-aware
     datetime, defaulting to now; it exists so the agreement with
     in_posting_window can be tested at a chosen time rather than only at the
@@ -56,7 +56,11 @@ def skip_window_reason(dt=None) -> str | None:
     This function only names the reason; it no longer decides.
     """
     et = dt or now_utc().astimezone(ET)
-    if in_posting_window(et):
+    # The tenant reaches in_posting_window so an always_on record is awake here
+    # too. Delegating the decision is the whole point of this function: the two
+    # drifted once already and the notifier pushed drafts on a Sunday night that
+    # nothing else was awake to have made.
+    if in_posting_window(et, tenant=tenant):
         return None
     weekday = et.weekday()  # Mon=0 .. Sun=6
     if weekday == 5:
@@ -189,7 +193,7 @@ def main() -> int:
     # manual test that can push past a tripwire is not a test, it is the thing
     # the tripwire exists to stop.
     force = "--force" in sys.argv
-    skip = skip_window_reason()
+    skip = skip_window_reason(tenant=tenant)
     if skip and not force:
         print(f"skip window: {skip}")
         return 0

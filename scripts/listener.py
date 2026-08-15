@@ -271,8 +271,8 @@ def main(tenant):
     if is_paused(tenant):
         print(f"[{tenant.id}] paused/halted, exiting")
         return 0
-    if not force and not in_posting_window():
-        print("outside posting window, exiting")
+    if not force and not in_posting_window(tenant=tenant):
+        print(f"[{tenant.id}] outside posting window, exiting")
         return 0
     if reads_today(tenant) >= cap:
         print(f"[{tenant.id}] daily read cap {cap} reached, exiting")
