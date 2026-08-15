@@ -271,6 +271,32 @@ def parse_pause_duration(token: str) -> timedelta | None:
     return None
 
 
+def owner_id() -> str:
+    """Who owns this installation. One answer, for every caller.
+
+    Four files each had their own copy of this and all four ended in the
+    author's first name as a literal fallback, which shipped in the public
+    package: on somebody else's Mac, anything run outside a launchd agent
+    resolved to a tenant named after a stranger, found nothing, and reported it
+    in a way that gave no hint why.
+
+    Order matters. The env var wins because install.py writes the box owner
+    into every agent's environment and that is the most specific statement of
+    intent. .karamel is next, written once by the bootstrap, which is what makes
+    a command typed by hand agree with the same command run by an agent. The
+    placeholder is last and is not a person's name."""
+    env = os.environ.get("KARAMEL_OWNER")
+    if env:
+        return env
+    try:
+        marker = json.loads((PROJECT / ".karamel").read_text()).get("owner")
+        if marker:
+            return marker
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    return "owner"
+
+
 def post_url(draft_text: str, in_reply_to: str | None = None) -> str:
     """A link that opens X's composer with this text already in it.
 

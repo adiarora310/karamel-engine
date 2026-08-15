@@ -26,7 +26,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from shared import PROJECT, agent_labels
+from shared import PROJECT, agent_labels, owner_id
 
 # Restarting these is the difference between a pull and a deploy. Anything that
 # holds state in memory across fires belongs here. Named by component, not by
@@ -233,8 +233,7 @@ def main():
     if "--selftest" in sys.argv:
         selftest()
         return 0
-    import os
-    owner = os.environ.get("KARAMEL_OWNER") or "adi"
+    owner = owner_id()
     if "--owner" in sys.argv:
         i = sys.argv.index("--owner")
         if i + 1 < len(sys.argv):

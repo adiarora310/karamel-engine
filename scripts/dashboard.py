@@ -27,7 +27,7 @@ import sys
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from shared import CONFIG_DIR, PROJECT, is_agent_line
+from shared import CONFIG_DIR, PROJECT, is_agent_line, owner_id
 
 DEFAULT_PORT = 8765
 
@@ -64,13 +64,10 @@ def load_token():
 # --------------------------------------------------------------- gathering
 
 def _owner():
-    f = PROJECT / ".karamel"
-    if f.exists():
-        try:
-            return json.loads(f.read_text()).get("owner")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return os.environ.get("KARAMEL_OWNER") or "adi"
+    """Delegates to shared.owner_id: one resolution order for every caller.
+
+    This was a local copy ending in a literal personal name, which shipped."""
+    return owner_id()
 
 
 def rows(path, limit=None):

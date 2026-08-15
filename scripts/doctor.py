@@ -32,7 +32,9 @@ import sys
 import time
 from pathlib import Path
 
-from shared import CONFIG_DIR, PROJECT, agent_plists, is_agent_line
+from shared import (
+    CONFIG_DIR, PROJECT, agent_plists, is_agent_line, owner_id,
+)
 
 # A check that fails here means no drafts at all, versus one that degrades
 # something. The distinction drives both the exit code and whether watch mode
@@ -60,13 +62,10 @@ class Check:
 
 
 def _owner():
-    f = PROJECT / ".karamel"
-    if f.exists():
-        try:
-            return json.loads(f.read_text()).get("owner")
-        except (json.JSONDecodeError, OSError):
-            pass
-    return os.environ.get("KARAMEL_OWNER") or "adi"
+    """Delegates to shared.owner_id: one resolution order for every caller.
+
+    This was a local copy ending in a literal personal name, which shipped."""
+    return owner_id()
 
 
 # ------------------------------------------------------------------ the checks
