@@ -232,6 +232,20 @@ def decide(scores, draft, allow_em_dash=False):
     sounds like them rejected here before the model's verdict was even read."""
     if not allow_em_dash and has_em_dash(draft):
         return "FAIL", "em-dash present (tenant rule, deterministic)"
+    # A draft that still names a blank is not finished. The maker is allowed to
+    # write [VERIFY: median seed] rather than invent a number it cannot know,
+    # which is the right instinct and the reason the marker exists: the
+    # alternative is a fabricated statistic published in someone's own voice.
+    #
+    # It used to ship anyway, in an email shaped around the warning and with no
+    # post link, and that email is not wanted. Dropping only the email would
+    # send the same draft looking ordinary, one tap from publishing the literal
+    # text "[VERIFY: median seed]", so the draft is what gets rejected. Failing
+    # here sends the maker back with the reason and it usually returns with a
+    # sentence it can support instead.
+    slots = verify_slots(draft)
+    if slots:
+        return "FAIL", ("unfilled blank(s): " + "; ".join(slots[:4]))
     below = [a for a in AXES if scores.get(a, 0) < THRESHOLDS[a]]
     if below:
         return "FAIL", f"below bar on {', '.join(below)}"
@@ -335,6 +349,22 @@ def _feedback(verdict):
     through, so the maker was instructed to fix "none" and predictably came back
     worse. The failing axes are known deterministically, so say them."""
     parts = []
+    # The deterministic vetoes first, because they are the reason the draft
+    # failed and the model does not know about them: decide() can reject a
+    # draft the critic itself scored above the bar on every axis, in which
+    # case nothing else in here has anything to say and the maker was being
+    # told to "sharpen it" for an unfilled blank or an em dash.
+    override = (verdict.get("override") or "").strip()
+    if "blank" in override.lower():
+        parts.append(
+            "This draft still contains a [VERIFY: ...] placeholder, so it "
+            "cannot be published. Do not invent a number to fill it. Rewrite "
+            "the sentence so it makes a point you can support without the "
+            "missing fact, or drop that sentence. " + override)
+    elif "em-dash" in override.lower():
+        parts.append("Remove the em dash. Use a comma, a colon or a full stop.")
+    elif override:
+        parts.append(override)
     fix = (verdict.get("fix") or "").strip()
     if fix.lower().rstrip(".") not in _NO_FIX:
         parts.append(fix)

@@ -222,22 +222,22 @@ def classify_lane(topic, text, tenant=None):
     return LANES[0]
 
 
-def format_draft(register, topic, text, scores, when, verifies=(), draft_id=None):
+def format_draft(register, topic, text, scores, when, draft_id=None):
     """`when` is the tenant's local time, not the server's. One Mac serves
     people in several zones, and a draft stamped 6am for someone in London is
     a draft they will not trust.
 
     scores and register are no longer printed. The gate line read as raw Python
     in the middle of an otherwise plain-English email, and both are still on the
-    row and on the status page for anyone debugging."""
+    row and on the status page for anyone debugging.
+
+    There is one shape now. A draft that still carried a [VERIFY: ...] blank
+    used to arrive in a second shape, warning first and no post link, and that
+    email is not wanted. It is not simply dropped: critic.decide() rejects an
+    unfilled blank outright, so the draft never reaches delivery at all. The
+    alternative would have been sending the same text looking ordinary, one tap
+    from publishing the literal placeholder."""
     head = ""
-    if verifies:
-        # First, before the draft. A slot buried mid-paragraph gets posted
-        # verbatim by someone skimming on a phone, and "[VERIFY: ...]" in a live
-        # post is worse than the draft never having been sent.
-        asks = "\n".join(f"  {i}. {v}" for i, v in enumerate(verifies, 1))
-        head = (f"NOT READY TO POST. {len(verifies)} blank(s) to fill first:\n"
-                f"{asks}\n\n")
     # Words, not symbols. This started as ✅ ✏️ ❌ from the Telegram era, where a
     # reaction is one tap. On email somebody has to type it, and an emoji picker
     # is a worse ask than a word. Both still parse; the instruction names the
@@ -257,20 +257,16 @@ def format_draft(register, topic, text, scores, when, verifies=(), draft_id=None
     # https link opens the app.
     #
     # Deliberately absent when there are blanks to fill. A draft with a
-    # [VERIFY: ...] slot is not postable, and handing someone a one-click post
-    # button for it is handing them a way to publish a placeholder: the warning
-    # at the top says stop, and a button underneath saying go would win.
-    open_line = ("" if verifies else
-                 f"Click on the link to post it: {post_url(text)}\n\n")
+    # Always present now. It used to be withheld from a draft carrying a blank,
+    # because a one-tap post button under a "not ready" warning wins that
+    # argument, but such a draft no longer reaches this function: the gate
+    # rejects it.
+    open_line = f"Click on the link to post it: {post_url(text)}\n\n"
 
     tail = ("Reply to this email with one word or emoji:\n"
             "Posted or ✅: You published it as written.\n"
             "Skip or ❌: You binned it.\n"
             "Edited or ✏️: Followed by what you actually posted.")
-    if verifies:
-        tail = ("Fill the blank(s) above first, then reply:\n"
-                "Edited or ✏️: Followed by the finished text, so the version "
-                "that gets recorded is the one you posted.")
 
     # The id moved out of the subject and lives here. inbox.py reads it from
     # the RAW body of a reply, before the quoted original is stripped, so it
@@ -350,22 +346,26 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
                     print(f"      fix: {j['fix']}")
                 print(f"      draft: {(j.get('draft') or '')[:200]}")
             continue
+        # Belt and braces. decide() fails a draft that still has a blank, so a
+        # PASS cannot carry one, but this is the last point before a link that
+        # posts in one tap and the cost of being wrong here is publishing a
+        # placeholder in someone's own voice.
         verifies = critic.verify_slots(r["final"])
-        # Minted before the send, not after: it goes in the email subject, and a
-        # reply keeps the subject, which is how an inbound path will match it
-        # back to this row.
+        if verifies:
+            print(f"[{tenant.id}] NOT delivering, unfilled blank(s) survived "
+                  f"the gate: {verifies}", file=sys.stderr)
+            continue
+        # Minted before the send: it goes on the last line of the body, and
+        # inbox.py reads it back out of the quoted original in a reply.
         draft_id = int(time.time() * 1000)
         msg = format_draft(
             t["register"], t["topic"], r["final"], r.get("scores", {}),
-            tenant.now(), verifies=verifies, draft_id=draft_id,
+            tenant.now(), draft_id=draft_id,
         )
         # The lane, not the topic. A subject line is read in a list, where the
         # useful thing is what this is about, and the whole topic never fits.
         lane = classify_lane(t["topic"], r["final"], tenant)
-        if verifies:
-            subject = f"[Karamel] Your draft needs one detail first! {lane}"
-        else:
-            subject = f"[Karamel] Your draft is ready to post! {lane}"
+        subject = f"[Karamel] Your draft is ready to post! {lane}"
         mid = channels.send(tenant, msg, dry=dry, subject=subject)
         delivered += 1
         if dry:
@@ -563,23 +563,27 @@ def selftest():
         assert line in m, (line, m)
     assert "Click on the link to post it:" in m, m
 
-    # A draft with blanks says so BEFORE the text, not after it. Someone
-    # skimming on a phone posts what they read first.
-    v = format_draft("banger", "T", "the [VERIFY: seat count] post",
-                     {"TAKE": 9}, when, verifies=["seat count", "the date"])
-    assert v.index("NOT READY") < v.index("the [VERIFY"), "warning must precede the draft"
-    assert "2 blank(s)" in v and "seat count" in v and "the date" in v, v
-    # And it must not offer the one-tap approve that would post it verbatim.
-    assert "✅" not in v, "a draft with blanks must not be one-tap postable"
-    # Including the composer link. The warning at the top says stop; a button
-    # underneath saying go would win, and what gets published is a placeholder.
-    assert "intent/post" not in v and "twitter://" not in v, \
-        "a draft with unfilled blanks must not be one click from publication"
-    # A blanks draft asks only for an edit: posting it as written would publish
-    # a placeholder, so the other two words are deliberately absent.
-    assert "Edited" in v and "✏️" in v, v
-    assert "Posted" not in v and "Skip" not in v, \
-        "a draft with blanks has only one sensible answer"
+    # A draft carrying a blank never reaches an inbox at all now. The second
+    # email shape is gone, and it was NOT replaced by sending the same text in
+    # the ordinary shape: that would put a one-tap post link under the literal
+    # string "[VERIFY: seat count]". The gate rejects it instead, so the whole
+    # question is settled before delivery.
+    verdict, override = critic.decide(
+        {a: 10 for a in critic.AXES}, "the [VERIFY: seat count] post")
+    assert verdict == "FAIL", (verdict, override)
+    assert "blank" in override.lower(), override
+    assert "seat count" in override, override
+
+    # Scoring perfectly on every axis must not rescue it: the veto is
+    # deterministic, like the em-dash rule, and does not consult the model.
+    assert critic.decide({a: 10 for a in critic.AXES}, "clean post")[0] == "PASS"
+
+    # And the maker is told what to do about it. Without this the feedback fell
+    # through to "sharpen it", because the model had scored every axis above the
+    # bar and only decide() knew the draft was unfinished.
+    fb = critic._feedback({"verdict": "FAIL", "override": override, "fix": "none",
+                           "why": "", "scores": {a: 10 for a in critic.AXES}})
+    assert "VERIFY" in fb and "invent" in fb.lower(), fb
 
     # Topic refill. Nothing has ever written topic_queue.jsonl, so the seed
     # list was the whole supply and every install went silent once it ran out.
