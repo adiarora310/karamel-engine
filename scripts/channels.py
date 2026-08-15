@@ -18,6 +18,7 @@ BACKENDS, and add the type to tenants.VALID_CHANNELS so configs validate.
 from __future__ import annotations
 
 import json
+import sys
 
 from shared import CONFIG_DIR
 
@@ -180,7 +181,60 @@ def send_email(tenant, text, subject=None):
                 smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError as e:
         raise RuntimeError(auth_failure_hint(cfg, e)) from e
+    if to.lower() == (cfg.get("from_address") or "").lower():
+        mark_unread(cfg, mid)
     return mid
+
+
+def mark_unread(cfg, message_id, attempts=4, delay=1.5):
+    """Clear \\Seen on a message we just sent to ourselves. Best effort.
+
+    Karamel sends from the person's address to the same address, and Gmail
+    treats a message whose From matches the account as one the account sent:
+    it files it in the inbox already read. No unread badge, no notification,
+    nothing bold in the list. Measured on a live account: 43 Karamel messages
+    in INBOX, 0 unread, including one delivered four minutes earlier.
+
+    So the product looked broken for a whole evening while working perfectly.
+    Every layer reported success, because every layer had succeeded, and the
+    person kept saying they had received nothing. They had; it just never
+    announced itself.
+
+    Never fatal, and never raised: the draft is already delivered by the time
+    this runs, and a flag is not worth losing a send over. Only runs when
+    sender and recipient are the same mailbox, which is the only case that has
+    the problem."""
+    import imaplib
+    import time
+
+    host, port = cfg.get("imap_host"), int(cfg.get("imap_port") or 993)
+    if not host:
+        return False
+    for attempt in range(attempts):
+        # Delivery is not instant, so a search immediately after the send finds
+        # nothing. Sleep first, then look.
+        time.sleep(delay)
+        try:
+            M = imaplib.IMAP4_SSL(host, port, timeout=20)
+            try:
+                M.login(cfg["username"], cfg["password"])
+                M.select("INBOX")
+                st, data = M.search(None, "HEADER", "Message-ID", message_id)
+                ids = data[0].split() if st == "OK" and data and data[0] else []
+                if not ids:
+                    continue
+                for i in ids:
+                    M.store(i, "-FLAGS", "(\\Seen)")
+                return True
+            finally:
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+        except Exception as e:
+            if attempt == attempts - 1:
+                print(f"could not mark {message_id} unread: {e}", file=sys.stderr)
+    return False
 
 
 BACKENDS = {
