@@ -608,8 +608,13 @@ def build_daily_report(checks, hours=24):
     return "\n".join(L)[:MAX_REPORT_CHARS]
 
 
-def send_daily_report(dry=False):
+def send_daily_report(dry=False, first_run=False):
     """Email the operator. Silent when no operator is configured.
+
+    first_run relabels it as an install notice. The bootstrap fires this once
+    at the end of setup, because otherwise the operator's first word from a new
+    machine is the 08:00 report the following morning, and the hour after an
+    install is when it is most likely to break.
 
     Goes only to support_email, never to the tenant: this is an operations
     report about somebody's install, and the person using it has the status
@@ -637,9 +642,10 @@ def send_daily_report(dry=False):
         id, name = t.id, t.name
         channel = {"type": "email", "address": support}
 
+    subject = (f"[Karamel] {t.name}'s install is live"
+               if first_run else f"[Karamel] Daily report: {t.name}")
     try:
-        channels.send(_Operator(), body,
-                      subject=f"[Karamel] Daily report: {t.name}")
+        channels.send(_Operator(), body, subject=subject)
     except Exception as e:
         print(f"could not send the daily report to {support}: {e}",
               file=sys.stderr)
@@ -839,7 +845,8 @@ def main():
     if "--watch" in sys.argv:
         return watch(dry="--dry" in sys.argv)
     if "--report" in sys.argv:
-        return send_daily_report(dry="--dry" in sys.argv)
+        return send_daily_report(dry="--dry" in sys.argv,
+                                 first_run="--first-run" in sys.argv)
 
     deep = "--deep" in sys.argv
     checks = run_checks(deep=deep)
