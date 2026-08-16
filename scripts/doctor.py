@@ -253,26 +253,37 @@ def check_playwright():
     Only fatal when this tenant actually reads X. An install that writes
     originals and never scrapes does not need it, and reporting a missing
     package as a failure would teach the reader to ignore this report."""
+    # effective_reply_mining is a METHOD on Tenant, not a function in safety.
+    # Importing it from the wrong place raised AttributeError, a bare except
+    # swallowed it, and this reported "does not read X" for an install that
+    # reads X every twenty minutes. Failing closed on an unknown is right for a
+    # safety gate and wrong for a diagnostic: it turns a broken check into a
+    # confident wrong answer.
+    #
+    # So the unknown case now says it is unknown rather than picking an answer.
+    reading = None
     try:
         import tenants
-        from safety import effective_reply_mining
         t = tenants.load_tenant(_owner())
-        reading = bool(t and effective_reply_mining(t)[0])
-    except Exception:
-        reading = False
+        if t is not None:
+            reading = bool(t.effective_reply_mining()[0])
+    except Exception as e:
+        return Check("playwright", False,
+                     f"cannot tell whether this install reads X: {e}", "")
     try:
         import playwright  # noqa: F401
     except ImportError:
-        if not reading:
+        if reading is False:
             return Check("playwright", True,
                          "not installed, and not needed: this install does not "
                          "read X", level=WARN)
         return Check("playwright", False,
                      "not installed, so nothing can read your timeline",
                      "python3 -m pip install --user playwright")
-    return Check("playwright", True,
-                 "installed" + ("" if reading else ", though this install does "
-                                                   "not read X"))
+    if reading is False:
+        return Check("playwright", True,
+                     "installed, though this install does not read X")
+    return Check("playwright", True, "installed")
 
 
 def check_agents():
