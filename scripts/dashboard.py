@@ -531,8 +531,8 @@ DEMO = {
     "address": "sam@example.com", "card": "sam-rivera.md",
     "card_ok": True, "running": True,
     "agents": [{"label": f"com.karamel.{n}"} for n in
-               ("heartbeat", "inbox", "reflector", "doctor", "updater",
-                "dashboard")],
+               ("heartbeat", "inbox", "doctor", "operator-report", "updater",
+                "dashboard", "weekly-digester")],
     "drafts_total": 18, "answered": 15,
     "counts": {"posted_clean": 6, "posted_edited": 5, "skipped": 4},
     "gen_total": 24, "gen_passed": 18,

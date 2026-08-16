@@ -1,4 +1,8 @@
-"""karamel poller — §12.1-§12.6 Telegram receive-side.
+"""Karamel poller: the Telegram receive side.
+
+Not scheduled on an email install, and kept because inbox.py imports the token
+vocabulary from here. Two parsers for the same three answers would drift, and
+the drift would be silent.
 
 Long-polls Telegram getUpdates, routes each message to:
   - draft-reply handler (reply_to_message matches a known telegram_msg_id)
