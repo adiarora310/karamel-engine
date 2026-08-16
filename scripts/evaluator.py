@@ -3,9 +3,10 @@
 elapsed, scrape the posted reply's public metrics via CDP, write them into the
 matching engagement.jsonl row.
 
-X-touching: respects pause/halt (the /halt command stops this) and §11
-mitigations (random jitter, 30s+ delay between fetches, cap per run, daily
-read cap, login/challenge tripwire -> FULL HALT).
+X-touching: respects pause/halt, random jitter, a delay between fetches, a
+cap per run and a daily read cap. A login wall or a challenge page is a
+tripwire and halts everything. A browser that is merely closed is not: that
+exits non-zero and leaves the writing half running.
 
 Flags: --print (scrape but don't persist), --force (ignore the daily read cap)
        --expire-stale (retire long-overdue jobs WITHOUT scraping; see below)
@@ -198,7 +199,11 @@ def main():
         try:
             browser = p.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
         except Exception as e:
-            set_halt(f"CDP attach failed in evaluator: {e}")
+            # Infrastructure, not enforcement. Same reasoning as listener.py:
+            # halting here stops the writing half for a browser that is merely
+            # closed, and labels it as a platform tripwire.
+            print(f"cannot attach to Chrome on port {cdp_port}: {e}",
+                  file=sys.stderr)
             return 1
         ctx = browser.contexts[0]
         if ctx.pages:

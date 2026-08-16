@@ -292,8 +292,25 @@ def main(tenant):
         try:
             browser = p.chromium.connect_over_cdp(f"http://localhost:{cdp_port}")
         except Exception as e:
-            set_halt(f"CDP attach failed on port {cdp_port} "
-                     f"(Chrome bot profile down?): {e}", tenant=tenant)
+            # NOT a halt. A browser that is not running is infrastructure, and
+            # doctor._INFRA_HALT already says so: it lists "CDP attach failed"
+            # as the canonical example of a halt that is not enforcement.
+            #
+            # Halting for it is disproportionate twice over. It stops the
+            # WRITING half, which never touches X, so a quit Chrome window
+            # silently cancels the 09:00 draft. And set_halt writes the flag
+            # that means a platform tripwire fired, so the operator reads
+            # "TRIPWIRE HALT" and reasonably concludes the account was
+            # actioned. Observed on the host tonight: a Playwright protocol
+            # error left the whole system halted and labelled as enforcement.
+            #
+            # Failing loudly is enough. The agent exits non-zero, doctor's
+            # watch sees it and emails, and the reading half resumes by itself
+            # when the browser comes back.
+            print(f"[{tenant.id}] cannot attach to Chrome on port {cdp_port}: "
+                  f"{e}", file=sys.stderr)
+            print(f"[{tenant.id}] the Karamel Chrome window is probably closed. "
+                  f"Reopen it and this resumes on its own.", file=sys.stderr)
             return 1
         ctx = browser.contexts[0]
         page = ctx.new_page()
