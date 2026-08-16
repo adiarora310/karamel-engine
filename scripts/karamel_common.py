@@ -85,6 +85,23 @@ def in_posting_window(dt=None, tenant=None):
     if tenant is not None and getattr(tenant, "always_on", False):
         return True
     dt = dt or now_et()
+
+    # A tenant may state its own hours. The default below is one person's
+    # habit, not a law, and the alternative to a config field is editing this
+    # function for every install, which is how one tenant's preference becomes
+    # everybody's schedule.
+    #
+    # days: "all" is every day including Saturday; "weekdays" is Mon-Fri. The
+    # window is half open, start <= hour < end, so end=21 means nothing fires
+    # at 21:00 and the last run is in the 20:xx hour.
+    win = getattr(tenant, "posting_window", None) if tenant is not None else None
+    if win:
+        start = int(win.get("start", 7))
+        end = int(win.get("end", 21))
+        if win.get("days", "all") == "weekdays" and dt.weekday() > 4:
+            return False
+        return start <= dt.hour < end
+
     wd, hr = dt.weekday(), dt.hour  # Mon=0 .. Sun=6
     if wd <= 4:
         return 7 <= hr < 21

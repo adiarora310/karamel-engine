@@ -167,6 +167,30 @@ class Tenant:
         # rather than when it may do it. A flag that relaxed those would not be
         # a testing convenience, it would be turning the safety rails off.
         self.always_on = bool(data.get("always_on"))
+        # Their own hours, when the default does not suit. Shape:
+        #   {"start": 7, "end": 21, "days": "all"}   all days, 07:00-20:59
+        #   {"start": 9, "end": 18, "days": "weekdays"}
+        # Absent means the built-in default in karamel_common.in_posting_window.
+        # Validated here rather than trusted: a string where an hour belongs
+        # would raise inside the scheduler, on a background agent, where the
+        # traceback lands in a .err file nobody reads.
+        win = data.get("posting_window") or None
+        if win:
+            try:
+                start, end = int(win.get("start", 7)), int(win.get("end", 21))
+                if not (0 <= start < end <= 24):
+                    raise ValueError(f"start={start} end={end}")
+                days = str(win.get("days", "all")).lower()
+                if days not in ("all", "weekdays"):
+                    raise ValueError(f"days={days!r}")
+                win = {"start": start, "end": end, "days": days}
+            except (TypeError, ValueError) as e:
+                raise ValueError(
+                    f"tenant {data.get('id')!r} has an unusable posting_window "
+                    f"({e}). Expected start/end hours 0-24 with start < end, "
+                    f"and days of 'all' or 'weekdays'."
+                )
+        self.posting_window = win
         # --- reply-mining config. Only consulted when effective_reply_mining()
         # is True, which needs BOTH this tenant's flag and the code-level
         # allowlist in safety.py.
@@ -615,6 +639,24 @@ def selftest():
     loud = Tenant({"id": "z", "always_on": True})
     assert loud.reply_mining is False, "always_on must not open the reply gate"
     assert loud.max_reads_per_day == 100, "always_on must not raise the read cap"
+
+    # A tenant's own hours. Absent means the built-in default; present, it is
+    # normalised here so a bad value fails at load rather than inside a
+    # background agent, where the traceback goes to a .err file nobody reads.
+    assert Tenant({"id": "z"}).posting_window is None
+    w = Tenant({"id": "z", "posting_window": {"start": 7, "end": 21}}).posting_window
+    assert w == {"start": 7, "end": 21, "days": "all"}, w
+    w2 = Tenant({"id": "z", "posting_window":
+                 {"start": "9", "end": "18", "days": "WEEKDAYS"}}).posting_window
+    assert w2 == {"start": 9, "end": 18, "days": "weekdays"}, w2
+    for bad in ({"start": 21, "end": 7}, {"start": -1, "end": 9},
+                {"start": 0, "end": 25}, {"days": "sometimes"},
+                {"start": "morning"}):
+        try:
+            Tenant({"id": "z", "posting_window": bad})
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted an unusable window: {bad}")
 
     print("tenants selftest: all assertions passed")
 
