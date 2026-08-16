@@ -193,8 +193,14 @@ def _deliver(tenant, text, subject=None):
 
 def main() -> int:
     if not DRAFTS.exists():
-        print("drafts.jsonl missing", file=sys.stderr)
-        return 1
+        # Not an error. The file appears the first time the drafter writes a
+        # reply, so on a fresh install it is simply absent, and every twenty
+        # minutes this wrote "drafts.jsonl missing" to stderr and exited 1.
+        # The watchdog reads new stderr, found no failing check to attach it to,
+        # and mailed a person "something doesn't look right" whose only content
+        # was a log line meaning nothing has happened yet.
+        print("no reply drafts yet")
+        return 0
     tenant = _tenant()
     kind = ((tenant.channel if tenant else None) or {}).get("type", "none")
     if kind == "none":

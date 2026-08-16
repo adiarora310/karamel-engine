@@ -460,11 +460,24 @@ def build_alert(failures, stderr_by_log, support=None):
     and cannot read a stack trace. What they need in the first screen is the
     one command that might fix it; what broke is context for whoever they
     forward it to."""
-    lines = ["Oops, something doesn't look right."]
+    # Two different emails, because they are two different situations and the
+    # copy has to match. A failing check has a remedy and an imperative. A log
+    # line nobody has a check for is a curiosity: it may be nothing, there is
+    # no command to run, and telling somebody "here is what you can do:
+    # nothing" and then "if that does not fix it" is a dead end that also
+    # contradicts itself. Sent once, live, to a real person.
+    log_only = not failures
+    lines = ["Something in the logs is new."] if log_only else \
+            ["Oops, something doesn't look right."]
 
     remedies = [c.remedy for c in failures if getattr(c, "remedy", "")]
     lines.append("")
-    lines.append("Here's what you can do:")
+    if log_only:
+        lines.append("Nothing is failing, and there is nothing for you to run. "
+                     "This is a message this Mac has not logged before, which "
+                     "is usually nothing.")
+    else:
+        lines.append("Here's what you can do:")
     if remedies:
         # Deduplicated: several checks failing off one cause tend to name the
         # same command, and three copies of it reads as three problems.
@@ -474,11 +487,11 @@ def build_alert(failures, stderr_by_log, support=None):
                 seen.append(r)
         for r in seen:
             lines.append(f"  {r}")
-    else:
+    elif not log_only:
         lines.append("  Nothing you can run will fix this one.")
 
     lines.append("")
-    lines.append("What went wrong:")
+    lines.append("What the logs said:" if log_only else "What went wrong:")
     for c in failures:
         lines.append(f"  {c.name}: {c.detail}")
     for name, chunk in stderr_by_log.items():
@@ -489,8 +502,11 @@ def build_alert(failures, stderr_by_log, support=None):
 
     if support:
         lines.append("")
-        lines.append(f"If that does not fix it, forward this email to "
-                     f"{support} and we will fix it for you.")
+        lines.append(
+            f"Forward this to {support} and we will take a look."
+            if log_only else
+            f"If that does not fix it, forward this email to {support} and we "
+            f"will fix it for you.")
 
     out = "\n".join(lines)
     return out[:MAX_ALERT_CHARS]
@@ -785,6 +801,24 @@ def selftest():
     assert msg.index("add one") < msg.index("boom"), \
         "a remedy must not sit below a stack trace"
     assert len(build_alert([], {"a.err": "x" * 5000})) <= MAX_ALERT_CHARS
+
+    # A log line with no failing check is a different email. "Here's what you
+    # can do: nothing you can run will fix this one", followed by "if that does
+    # not fix it", is a dead end that contradicts itself, and it was sent to a
+    # real person over a fresh install having written no reply drafts yet.
+    logonly = build_alert([], {"notifier.err": "drafts.jsonl missing"},
+                          support="ops@example.com")
+    assert logonly.startswith("Something in the logs is new."), logonly
+    assert "Nothing you can run" not in logonly, logonly
+    assert "If that does not fix it" not in logonly, logonly
+    assert "Forward this to ops@example.com" in logonly, logonly
+    assert "What the logs said" in logonly, logonly
+
+    # And a real failure keeps the imperative shape.
+    real = build_alert([Check("agents", False, "d", "do this")], {},
+                       support="ops@example.com")
+    assert real.startswith("Oops, something doesn't look right."), real
+    assert "Here's what you can do" in real and "do this" in real, real
 
     # The forward line only when an address is configured. Compiling one in
     # would ship a personal address to everyone who clones this, and on the
