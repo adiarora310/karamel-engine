@@ -10,19 +10,21 @@ This closes it. One IMAP pass per run, same shape as poller.main().
 
 FOUR THINGS THAT MATTER
 
-1. Quoted text is stripped before any token detection. The draft email we send
-   ENDS with the literal line "reply with the check to post, pencil plus your
-   edit, or cross to skip.  ✅ ✏️ ❌". Almost every mail client quotes the
-   original beneath the reply, so parsing a whole message body would read our
-   own instructions back as the user's answer and mark every reply as posted,
-   including the ones that said no. See strip_quoted().
+1. Quoted text is stripped before any token detection. Our draft email lists
+   all three answers, "Posted or ✅", "Skip or ❌", "Edited or ✏️", and almost
+   every client quotes the original beneath the reply. Parsing a whole message
+   body would therefore read our own instructions back as the person's answer
+   and match whichever appeared first, marking replies that said skip as
+   posted. See strip_quoted(), and html_to_text() for the HTML spelling.
 
 2. Routing is by From address, matched against a tenant's configured channel.
    An email from an address no tenant owns is ignored, never guessed at.
 
-3. Correlation is In-Reply-To first, then the "#<draft_id>" the subject carries.
-   Reply-All, forwards and clients that rewrite Message-IDs all keep the
-   subject, so the fallback is the one that usually works.
+3. Correlation is In-Reply-To first, then the "Draft #<id>" line at the foot
+   of the body. The id used to live in the subject and moved when the copy was
+   rewritten, so the fallback now reads the RAW body, quoted original included.
+   That is safe precisely because correlation is a different question from
+   intent: the text it reads is text that must never be parsed for tokens.
 
 4. The token vocabulary is imported from poller, not reimplemented. Two parsers
    for the same three symbols would drift, and the drift would be silent.
@@ -573,6 +575,9 @@ def selftest():
         "❌ not this one, too close to the last post\n"
         "\n"
         "On Mon, 10 Aug 2026 at 09:30, Karamel <k@example.com> wrote:\n"
+        # The pre-2026-08 draft format, on purpose: drafts sent before the
+        # copy was rewritten are still in the mailbox, and a reply to one
+        # of those has to keep parsing.
         "> [KARAMEL DRAFT, analytical, Mon Aug 10 09:30 BST]\n"
         "> Topic: something\n"
         ">\n"

@@ -1,4 +1,4 @@
-"""karamel notifier — §12.2 per-draft sends with telegram_msg_id capture.
+"""Karamel notifier: sends the reply drafts, one email each.
 
 Pre-flight: git pull, files exist, skip-window, pause state, daily cap.
 Find pending+un-notified drafts, sort by age, take 12, re-run anti-pattern filter.
@@ -25,7 +25,7 @@ from shared import (
 )
 
 MAX_BATCH = 12
-DAILY_CAP = 50   # Telegram messages/day. NOT a reply cap: see below.
+DAILY_CAP = 50   # Messages a day. NOT a reply cap: see below.
 
 # This file pushes reply drafts (DRAFTS = drafts.jsonl). Originals go out via
 # heartbeat.py from original_drafts.jsonl and are not subject to the reply cap.
@@ -322,7 +322,10 @@ def main() -> int:
         # mark notified in-place
         draft["notified_ts"] = now_iso()
         draft["notifier_message_id"] = msg_id  # legacy field
-        draft["telegram_msg_id"] = msg_id      # §12.2 field
+        # Legacy key name. It holds whatever id the channel returned, which is
+        # a Message-ID on email; inbox.locate_draft and reflector both match on
+        # it, so renaming it means migrating every row already on disk.
+        draft["telegram_msg_id"] = msg_id
         draft["compose_url"] = compose_url(draft["tweet_id"], draft.get("draft_text", ""))
         sent_count += 1
 

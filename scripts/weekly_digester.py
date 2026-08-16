@@ -222,8 +222,8 @@ def run_tenant(t, days=7, do_print=False, force=False):
         proposals.append("No clear patterns yet. It needs more weeks.")
 
     L.append("")
-    L.append(f"What Karamel noticed, for you to confirm. Nothing here is "
-             f"applied on its own.")
+    L.append("What Karamel noticed, for you to confirm. "
+             "Nothing here is applied on its own.")
     for prop in proposals:
         L.append(prop)
 

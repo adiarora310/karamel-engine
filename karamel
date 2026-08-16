@@ -380,7 +380,7 @@ def _clear_own_halt():
     if not st.get("halt"):
         return
     if st.get("halt_reason") != STOP_REASON:
-        say(f"  NOT starting: halted by something other than ./karamel stop.")
+        say("  NOT starting: halted by something other than ./karamel stop.")
         say(f"  reason: {st.get('halt_reason')}")
         say("  Read that before clearing it. Run ./karamel doctor.")
         return False
@@ -685,7 +685,8 @@ def cmd_migrate():
         say("Left alone. The old name keeps working indefinitely.")
         return 0
     old.rename(new)
-    say(f"Moved. Stop and start anything running: ./karamel stop && ./karamel start")
+    say("Moved. Stop and start anything running: "
+        "./karamel stop && ./karamel start")
     return 0
 
 

@@ -138,16 +138,15 @@ def auth_failure_hint(cfg, err):
 def send_email(tenant, text, subject=None):
     """Deliver one draft by email. Returns the Message-ID.
 
-    The Message-ID and the draft id in the subject are how inbox.py matches a
-    reply back to its draft: a mail client puts both in the reply (In-Reply-To,
-    and "Re: ..." keeps the subject). It tries the Message-ID first because it
-    is exact, then the subject id because that survives clients which rewrite
-    Message-IDs, and forwards.
+    The Message-ID is how inbox.py matches a reply back to its draft. It is
+    exact, and every client that hits reply sets In-Reply-To from it.
 
-    So BOTH must keep travelling. Dropping the id from the subject to make it
-    tidier would break every reply from a client that rewrites Message-IDs, and
-    it would break silently: the mail arrives, parses, matches nothing, and the
-    approval is lost with no error anywhere.
+    The fallback is the "Draft #<id>" line at the foot of the body, which
+    survives into the quoted original of a reply and is read from the RAW body
+    before quoting is stripped. It used to ride in the subject; it moved when
+    the copy was rewritten. Either can carry the correlation, and losing both
+    fails silently: the mail arrives, parses, matches nothing, and the approval
+    is gone with no error anywhere.
     """
     import smtplib
     from email.message import EmailMessage
@@ -426,5 +425,4 @@ def _main():
 
 
 if __name__ == "__main__":
-    import sys
     sys.exit(_main())

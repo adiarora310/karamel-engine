@@ -21,13 +21,12 @@ from __future__ import annotations
 import html
 import inspect
 import json
-import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from shared import CONFIG_DIR, PROJECT, is_agent_line, owner_id
+from shared import CONFIG_DIR, is_agent_line, owner_id
 
 DEFAULT_PORT = 8765
 

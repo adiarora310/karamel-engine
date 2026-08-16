@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 import llm
 from karamel_common import (
-    DATA, ROOT, append_jsonl, compose_url, in_posting_window, is_paused,
+    DATA, append_jsonl, compose_url, in_posting_window, is_paused,
     load_config, now_iso, read_jsonl,
 )
 import tenants
