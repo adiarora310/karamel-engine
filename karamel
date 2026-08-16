@@ -407,7 +407,7 @@ def cmd_start():
     # plist and nothing ever loaded it. An unloaded agent produces no log, no
     # error and no exit code, which is why it stayed invisible: the component
     # had never run once, on any install, for anybody.
-    for label in (("heartbeat", "reflector", "doctor", "updater", "dashboard",
+    for label in (("heartbeat", "doctor", "updater", "dashboard",
                    "weekly-digester")
                   + _reply_agents() + _reading_agents()):
         p = agents / f"com.karamel.{label}.plist"

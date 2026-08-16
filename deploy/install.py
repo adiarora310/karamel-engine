@@ -49,11 +49,20 @@ AGENTS_SPEC = {
     # everybody else, and the weekly gate lives in the script's watermark so a
     # Mac asleep at 18:00 delivers on wake instead of losing the week.
     "weekly-digester": ("weekly_digester.py", ["--all"], [(18, 0)]),
-    # Every tenant, not just the owner of the box. This is the loop that makes a
-    # voice card sharpen toward what someone actually publishes; running it for
-    # one person on a multi-tenant install means everybody else's answers are
-    # recorded and never read.
-    "reflector": ("reflector.py", ["--all"], [(17, 0)]),
+    # NOT scheduled. reflector.py analyses how somebody edits their drafts and
+    # proposes voice-card changes, and its report is no longer wanted: the
+    # weekly digest already carries proposals. It never edited the card by
+    # itself, so with nothing reading the report it was a daily model call
+    # producing a file nobody opened.
+    #
+    # Deliberately absent rather than written-and-unloaded. install.py writing
+    # a plist that ./karamel start never loads is exactly how weekly-digester
+    # went a year without running once, invisibly, because an unloaded agent
+    # produces no log and no exit code.
+    #
+    # The script stays in the tree and still works by hand:
+    #   cd ~/karamel && PYTHONPATH=scripts python3 scripts/reflector.py --all --print
+
     # The two agents that exist for a machine you cannot log into. The doctor
     # reports failures to the operator's own channel; without it, a break on
     # someone else's Mac looks exactly like a quiet week. The updater is how a
