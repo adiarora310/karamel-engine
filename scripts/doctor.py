@@ -241,6 +241,39 @@ def classify_halt(reason):
     return "unknown"
 
 
+def check_playwright():
+    """The reading half's one external dependency.
+
+    listener, drafter and evaluator import it lazily inside their run, so a
+    missing package is not a startup error anyone sees. It is an ImportError
+    every twenty minutes, in a log file, on a machine nobody is watching, while
+    the writing half keeps delivering and every other check here stays green.
+
+    Only fatal when this tenant actually reads X. An install that writes
+    originals and never scrapes does not need it, and reporting a missing
+    package as a failure would teach the reader to ignore this report."""
+    try:
+        import tenants
+        from safety import effective_reply_mining
+        t = tenants.load_tenant(_owner())
+        reading = bool(t and effective_reply_mining(t)[0])
+    except Exception:
+        reading = False
+    try:
+        import playwright  # noqa: F401
+    except ImportError:
+        if not reading:
+            return Check("playwright", True,
+                         "not installed, and not needed: this install does not "
+                         "read X", level=WARN)
+        return Check("playwright", False,
+                     "not installed, so nothing can read your timeline",
+                     "python3 -m pip install --user playwright")
+    return Check("playwright", True,
+                 "installed" + ("" if reading else ", though this install does "
+                                                   "not read X"))
+
+
 def check_agents():
     try:
         r = subprocess.run(["launchctl", "list"], capture_output=True, text=True,
@@ -331,8 +364,8 @@ def check_gate():
 
 def run_checks(deep=False):
     return [check_python(), check_key(deep), check_tenant(), check_voice_card(),
-            check_channel(), check_halt(), check_agents(), check_recent_draft(),
-            check_gate()]
+            check_channel(), check_playwright(), check_halt(), check_agents(),
+            check_recent_draft(), check_gate()]
 
 
 # ------------------------------------------------------------------ log tailing
