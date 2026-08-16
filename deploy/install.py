@@ -68,6 +68,14 @@ AGENTS_SPEC = {
     # someone else's Mac looks exactly like a quiet week. The updater is how a
     # fix reaches them once it is written.
     "doctor": ("doctor.py", ["--watch"], 1800),
+    # The operator's daily report, 08:00. The watchdog above only speaks when a
+    # check fails, which makes silence ambiguous: a healthy install and a Mac
+    # switched off for a week look identical from outside. It also misses
+    # everything that is wrong without failing, which is most of what has gone
+    # wrong here. This one sends counts and every non-empty error log whether
+    # or not anything failed, and only to support_email, so it does nothing at
+    # all on the operator's own machine.
+    "operator-report": ("doctor.py", ["--report"], [(8, 0)]),
     "updater": ("updater.py", ["--quiet"], [(4, 30)]),
 }
 

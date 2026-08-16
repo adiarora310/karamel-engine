@@ -29,6 +29,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from shared import (
@@ -484,6 +485,158 @@ def build_alert(failures, stderr_by_log, support=None):
     return out[:MAX_ALERT_CHARS]
 
 
+MAX_REPORT_CHARS = 12000
+
+
+def _rows_since(path, hours=24):
+    """JSONL rows stamped within the window. Unstampable rows are counted.
+
+    Dropping a row it cannot date would make a missing timestamp key read as a
+    quiet day, which is how the weekly digest came to report 0/0 on a week with
+    five drafts."""
+    if not path or not path.exists():
+        return []
+    cutoff = time.time() - hours * 3600
+    out = []
+    for line in path.read_text().splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        stamp = None
+        for k in ("ts_iso", "drafted_at", "generated_at", "discovered_at",
+                  "confirmed_ts", "added_at"):
+            if row.get(k):
+                stamp = row[k]
+                break
+        if stamp is None:
+            out.append(row)
+            continue
+        try:
+            dt = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+            if dt.timestamp() >= cutoff:
+                out.append(row)
+        except ValueError:
+            out.append(row)
+    return out
+
+
+def build_daily_report(checks, hours=24):
+    """What the operator gets every day, working or not.
+
+    The watchdog only speaks when a check fails, and then sends six lines of
+    stderr. That makes silence ambiguous: a healthy install and a Mac that has
+    been shut down for a week look identical from the outside. It also misses
+    everything that is wrong without failing, which is most of what went wrong
+    building this: a gate rejecting almost everything, replies never drafting
+    while originals flowed, a queue quietly running dry.
+
+    So this is unconditional, carries counts rather than verdicts, and includes
+    the tail of every non-empty error log whether or not a check noticed it."""
+    import tenants
+
+    t = tenants.load_tenant(_owner())
+    name = f"{t.name} ({t.id})" if t else _owner()
+    when = (t.now() if t else datetime.now()).strftime("%A %d %B, %H:%M")
+    L = [f"Karamel daily report: {name}", when, ""]
+
+    bad = [c for c in checks if not c.ok]
+    L.append("Health")
+    if bad:
+        for c in bad:
+            L.append(f"  FAIL  {c.name}: {c.detail}")
+            if c.remedy:
+                L.append(f"        fix: {c.remedy}")
+    else:
+        L.append(f"  all {len(checks)} checks passing")
+
+    if t:
+        L.append("")
+        L.append(f"Last {hours} hours")
+        counts = [
+            ("originals emailed", t.original_drafts_path),
+            ("candidates scraped", t.data_dir / "candidates.jsonl"),
+            ("reply drafts", t.drafts_path),
+            ("replies you answered", t.engagement_path),
+        ]
+        for label, path in counts:
+            L.append(f"  {label:22} {len(_rows_since(path, hours))}")
+        gen = _rows_since(t.generated_path, hours)
+        passed = sum(1 for g in gen if g.get("verdict") == "PASS")
+        L.append(f"  {'cleared the critic':22} {passed}/{len(gen)}")
+
+    L.append("")
+    L.append("Agents")
+    try:
+        r = subprocess.run(["launchctl", "list"], capture_output=True, text=True,
+                           timeout=20)
+        rows = [l.split() for l in r.stdout.splitlines() if is_agent_line(l)]
+        if rows:
+            for row in rows:
+                L.append(f"  {row[-1]:32} exit={row[1]}")
+        else:
+            L.append("  none loaded")
+    except (OSError, subprocess.TimeoutExpired) as e:
+        L.append(f"  could not read launchctl: {e}")
+
+    # Every non-empty error log, not only the ones a check flagged. The point of
+    # this report is the things no check knows to look for.
+    logs = [p for p in err_logs() if p.stat().st_size]
+    L.append("")
+    L.append("Error logs" if logs else "Error logs: all empty")
+    for p in logs:
+        tail = p.read_text(errors="replace").strip().splitlines()[-20:]
+        if not tail:
+            continue
+        L.append("")
+        L.append(f"  {p.name}:")
+        L.extend(f"    {line[:200]}" for line in tail)
+
+    return "\n".join(L)[:MAX_REPORT_CHARS]
+
+
+def send_daily_report(dry=False):
+    """Email the operator. Silent when no operator is configured.
+
+    Goes only to support_email, never to the tenant: this is an operations
+    report about somebody's install, and the person using it has the status
+    page and the drafts themselves. On the operator's own machine no address is
+    set, so this does nothing, which is correct."""
+    support = support_email()
+    if not support and not dry:
+        # Correct on the operator's own machine, where there is nobody to
+        # report to. --dry still renders, so the report can be read anywhere.
+        print("no support_email configured, nothing to report to")
+        return 0
+    import channels
+    import tenants
+
+    t = tenants.load_tenant(_owner())
+    if t is None:
+        print(f"no tenant {_owner()!r}", file=sys.stderr)
+        return 1
+    body = build_daily_report(run_checks(deep=False))
+    if dry:
+        print(body)
+        return 0
+
+    class _Operator:
+        id, name = t.id, t.name
+        channel = {"type": "email", "address": support}
+
+    try:
+        channels.send(_Operator(), body,
+                      subject=f"[Karamel] Daily report: {t.name}")
+    except Exception as e:
+        print(f"could not send the daily report to {support}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"daily report sent to {support}")
+    return 0
+
+
 def watch(dry=False):
     """One unattended pass. Reports new stderr and newly-failing FATAL checks."""
     state = load_state()
@@ -674,6 +827,8 @@ def main():
         return 0
     if "--watch" in sys.argv:
         return watch(dry="--dry" in sys.argv)
+    if "--report" in sys.argv:
+        return send_daily_report(dry="--dry" in sys.argv)
 
     deep = "--deep" in sys.argv
     checks = run_checks(deep=deep)
