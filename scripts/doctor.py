@@ -476,7 +476,32 @@ def watch(dry=False):
         t = tenants.load_tenant(_owner())
         if t is None:
             raise RuntimeError(f"no tenant {_owner()!r}")
-        channels.send(t, msg, dry=dry, subject="[Karamel] Oops, something doesn\'t look right...")
+        subject = "[Karamel] Oops, something doesn't look right..."
+        channels.send(t, msg, dry=dry, subject=subject)
+
+        # And to the operator directly, when one is configured. The email tells
+        # the person to forward it, which is fine when they notice, and this is
+        # a machine nobody is looking at: the whole reason this file exists is
+        # that a break on somebody else's Mac is indistinguishable from a quiet
+        # week. Depending on the one person who cannot debug it to relay the
+        # alert puts the only signal behind the least reliable step.
+        #
+        # Sent separately rather than as a Cc so a delivery failure to one
+        # address cannot swallow the other, and so the operator's copy is
+        # unaffected by whatever is wrong with the tenant's mail.
+        support = support_email()
+        addr = ((t.channel or {}).get("address") or "").lower()
+        if support and support.lower() != addr:
+            try:
+                class _Operator:
+                    id, name = t.id, t.name
+                    channel = {"type": "email", "address": support}
+                channels.send(_Operator(), f"[{t.name} / {t.id}]\n\n{msg}",
+                              dry=dry,
+                              subject=f"[Karamel] {t.name}'s install needs a look")
+            except Exception as e:
+                print(f"could not copy the operator at {support}: {e}",
+                      file=sys.stderr)
     except Exception as e:
         # The alert path itself failing is the one error that cannot be
         # delivered. Say it loudly on stdout, which launchd captures.
