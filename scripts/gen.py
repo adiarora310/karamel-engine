@@ -87,6 +87,8 @@ CLEAN is the axis drafts fail on, and it is graded against this exact list. Avoi
 {clean_note}
 {dash_rule}Open with a fact, a name, or a scene, never a question.
 
+IT MUST STAND ALONE. A stranger reads it cold, with nothing above it. Name who and what in the sentence that needs them: "my dog" rather than "she", the product rather than "it". A post that only makes sense to somebody who was in the room is rejected.
+
 LENGTH IS A HARD GATE: {ceiling} characters, counted. A draft over it is rejected before anything else is read, so write to the limit rather than trimming afterwards. This is a post, not an essay: one idea, said once. Do not add a closing line that restates what you already said.
 
 These constructions are refused deterministically. A draft containing one is rejected no matter how good it is:

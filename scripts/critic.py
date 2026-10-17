@@ -153,6 +153,8 @@ DRAFT TO GRADE:
 ON [VERIFY: ...] SLOTS. The maker is forbidden from inventing a statistic, date, or quote, and is instructed to write [VERIFY: what to confirm] where a fresh specific belongs. A slot is that rule working, not a hedge. Grade the draft as if each slot will be filled with a real, correct specific before it is posted, because a human fills it. Do NOT dock SPECIFIC or VOICE merely for the presence of a slot.
 Two things still fail. A draft whose central claim IS the slot, so that nothing survives if the number turns out unremarkable, is weak: dock TAKE. And a draft that is vague everywhere OTHER than its slots is vague: grade that normally.
 
+STANDALONE is a yes/no, judged before the axes. A post is read cold by a stranger scrolling, with no prior post for context. It fails if a pronoun names somebody the draft never introduced ("She picks the tennis ball" when no person or animal was named), if it refers to a scene, product or event the reader is assumed to already know, or if the first sentence cannot be understood on its own. This is the most common way a draft that reads fine to its author reads as nonsense to everybody else.
+
 Score each axis 1 to 10:
 - VOICE: matches the card's texture, register, openers, and rules.
 - TAKE: lands a point of view, an angle, or a verdict. A draft that recounts true facts with no angle scores LOW here. This is the most important axis. "This happened, then this happened" is a fail.
@@ -166,7 +168,8 @@ The tells to look for:
 Report them on the TELLS line as: "exact quote" (name of tell); "exact quote" (name of tell)
 Write TELLS: none if the draft is clean. Reporting nothing when the draft is clean is the correct answer, not a failure to look.
 
-Output EXACTLY these seven lines and nothing else:
+Output EXACTLY these eight lines and nothing else:
+STANDALONE: YES or NO
 VOICE: <1-10>
 TAKE: <1-10>
 SPECIFIC: <1-10>
@@ -254,6 +257,11 @@ def parse_verdict(out, draft=None):
     verified = verified_tells(draft, tells) if draft is not None else []
     if draft is not None:
         scores["CLEAN"] = clean_score(draft, tells, model_clean=scores.get("CLEAN", 0))
+    sa = re.search(r"^STANDALONE:\s*(YES|NO)", out, re.MULTILINE | re.IGNORECASE)
+    # Absent reads as yes. A grader that skipped the line has told us nothing,
+    # and inventing a veto out of silence would fail every draft the moment the
+    # prompt drifts.
+    standalone = (sa.group(1).upper() != "NO") if sa else True
     vm = re.search(r"^VERDICT:\s*(PASS|FAIL)", out, re.MULTILINE | re.IGNORECASE)
     why = re.search(r"^WHY:\s*(.+)$", out, re.MULTILINE)
     fix = re.search(r"^FIX:\s*(.+)$", out, re.MULTILINE)
@@ -263,6 +271,7 @@ def parse_verdict(out, draft=None):
         "model_verdict": model_verdict,
         "tells": verified,
         "tells_claimed": len(tells) if tells is not None else None,
+        "standalone": standalone,
         "why": (why.group(1).strip() if why else ""),
         "fix": (fix.group(1).strip() if fix else ""),
     }
@@ -295,6 +304,20 @@ MOTIF_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
 #: and the set read as a machine with one trick, which is the failure a per-draft
 #: grader structurally cannot see: it is only visible across a feed.
 MOTIF_LOOKBACK = 5
+
+#: References that are part of the persona and therefore the easiest to overuse.
+#:
+#: The rolling cooldown above treats every proper noun alike, which is right for
+#: a story that happened to come up twice. It is far too weak for a signature:
+#: "Rams" was in 42% of 143 shipped drafts and "Ring" in 14%, because the voice
+#: card named the design lens as the spine of the analytical register and the
+#: maker obeyed. A signature that appears every other post stops being a
+#: signature and becomes the tell.
+#:
+#: Locked for SIGNATURE_LOOKBACK drafts rather than banned, because they are
+#: genuinely his: the point is a budget, not an exile.
+SIGNATURE_MOTIFS = frozenset({"rams", "dieter", "braun", "ring"})
+SIGNATURE_LOOKBACK = 20
 
 
 def motifs(text):
@@ -329,9 +352,14 @@ def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
                 continue
     except OSError:
         return frozenset()
+    finals = [r for r in rows if r.get("final")]
     used = set()
-    for row in [r for r in rows if r.get("final")][-lookback:]:
+    for row in finals[-lookback:]:
         used |= motifs(row.get("final"))
+    # A signature counts for much longer, so one appearance in the last twenty
+    # drafts locks it even though it has fallen out of the rolling window.
+    for row in finals[-SIGNATURE_LOOKBACK:]:
+        used |= (motifs(row.get("final")) & SIGNATURE_MOTIFS)
     return frozenset(used)
 
 
@@ -348,7 +376,8 @@ def slop_hits(draft):
     return hits
 
 
-def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=()):
+def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
+           standalone=True):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -364,6 +393,8 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=())
     ceiling = int(max_chars or DEFAULT_MAX_CHARS)
     if draft and len(draft.strip()) > ceiling:
         return "FAIL", f"too long: {len(draft.strip())} chars, ceiling {ceiling}"
+    if not standalone:
+        return "FAIL", "needs context a stranger does not have"
     repeats = sorted(motifs(draft) & set(banned_motifs or ()))
     if repeats:
         return "FAIL", (
@@ -425,6 +456,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         parsed["scores"], draft, allow_em_dash=allow_em_dash,
         max_chars=getattr(tenant, "max_chars", None),
         banned_motifs=recent_motifs(getattr(tenant, "generated_path", None)),
+        standalone=parsed.get("standalone", True),
     )
     result = {
         "verdict": verdict,
