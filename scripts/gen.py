@@ -76,7 +76,11 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "episodes of\"), a question to the reader (\"Why is everyone acting so "
             "dumb?\"), or a reaction in the margin (\"honestly\", \"smh\", \"unfair\", "
             "\"I love it\"). A true, clever observation with nobody in it is exactly "
-            "the draft this gate exists to stop."
+            "the draft this gate exists to stop.\n\nVary the shape. Opening every "
+            "post with \"Just watched\" or closing every one with the same emoji "
+            "turns the fix into a new tic: they sign off with an emoji in about "
+            "one post in four, on four different ones, and a sign-off that "
+            "repeats is refused here."
         )
     else:
         presence_rule = (
@@ -377,11 +381,27 @@ def main():
         return 2
     rounds = int(rounds_str)
     seed = _arg("--seed")
+    # --tenant used to be passed straight through as a string, so every
+    # per-tenant rule read off the object (the length ceiling, the motif
+    # cooldown, the emoji cooldown) was silently absent from CLI runs and a
+    # draft tested here was graded more leniently than the same draft in
+    # production. Resolve it to the tenant, or say which ids exist.
+    tenant_id = _arg("--tenant")
+    tenant = None
+    if tenant_id:
+        # load_tenant returns None for an unregistered id rather than raising,
+        # and None here would mean "no tenant rules" without saying so.
+        tenant = tenants.load_tenant(tenant_id)
+        if tenant is None:
+            known = ", ".join(t.id for t in tenants.list_tenants()) or "none"
+            print(f"no such tenant {tenant_id!r} (registered: {known})",
+                  file=sys.stderr)
+            return 2
     try:
         r = generate_gated(voice, topic, register=register, max_rounds=rounds,
                            seed=seed, log=True, author=author,
                            allow_em_dash="--allow-em-dash" in sys.argv,
-                           tenant=_arg("--tenant"))
+                           tenant=tenant)
     except llm.LLMError as e:
         # Every one of these is a condition someone can act on: no credit, a bad
         # key, an unreachable API. Printing a traceback for them buries the one

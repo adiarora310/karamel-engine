@@ -488,6 +488,47 @@ def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
     return frozenset(used)
 
 
+EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]")
+EMOJI_LOOKBACK = 3
+
+
+def closing_emoji(draft):
+    """The reaction emoji a draft signs off with, or None.
+
+    His own posts end on one in 4 of 17, and on four different ones. The first
+    batch drafted after the card said the emoji were allowed ended 3 of 3 on
+    the same 🤌🏻, which is how the Rams reflex started: permission read as
+    instruction. Same answer as Rams, then, a cooldown rather than a ban."""
+    tail = (draft or "").rstrip()[-8:]
+    m = None
+    for m in EMOJI.finditer(tail):
+        pass
+    return m.group(0) if m else None
+
+
+def recent_closing_emoji(generated_path, lookback=EMOJI_LOOKBACK):
+    """True if any of the last few shipped drafts already signed off with one."""
+    import json as _json
+
+    path = pathlib.Path(generated_path) if generated_path else None
+    if not path or not path.exists():
+        return False
+    rows = []
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        return False
+    finals = [r for r in rows if r.get("final")]
+    return any(closing_emoji(r.get("final")) for r in finals[-lookback:])
+
+
 def slop_hits(draft):
     """The refused constructions present in a draft, as (quote, label) pairs.
 
@@ -502,7 +543,7 @@ def slop_hits(draft):
 
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
-           standalone=True, register=None):
+           standalone=True, register=None, emoji_cooling=False):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -530,6 +571,11 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
         return "FAIL", (
             "reference used in the last {} drafts: {}".format(
                 MOTIF_LOOKBACK, ", ".join(repeats[:3]))
+        )
+    if emoji_cooling and closing_emoji(draft):
+        return "FAIL", (
+            "closing emoji again: he signs off with one in about one post in "
+            "four, and not twice running"
         )
     if register in PRESENCE_REGISTERS and not has_presence(draft):
         return "FAIL", (
@@ -593,6 +639,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         banned_motifs=recent_motifs(getattr(tenant, "generated_path", None)),
         standalone=parsed.get("standalone", True),
         register=register,
+        emoji_cooling=recent_closing_emoji(
+            getattr(tenant, "generated_path", None)),
     )
     result = {
         "verdict": verdict,
@@ -963,6 +1011,17 @@ def selftest():
     assert decide(clean, authorless, register=None)[0] == "PASS"
     assert decide(clean, "Just read it. The fish is still dead.",
                   register="banger")[0] == "PASS"
+    # The sign-off emoji is rationed the way a signature reference is.
+    assert closing_emoji("the countdown is the ad. \U0001F90C\U0001F3FB") is not None
+    assert closing_emoji("no emoji here.") is None
+    assert closing_emoji("") is None
+    assert decide(clean, "Just read it. The fish is still dead. \U0001F57A",
+                  register="banger", emoji_cooling=True)[0] == "FAIL"
+    assert decide(clean, "Just read it. The fish is still dead. \U0001F57A",
+                  register="banger", emoji_cooling=False)[0] == "PASS"
+    assert decide(clean, "Just read it. The fish is still dead.",
+                  register="banger", emoji_cooling=True)[0] == "PASS"
+
     # Presence is not a licence: the other vetoes still run first.
     assert decide(clean, "I think, honestly, this is fine " + "x" * 300,
                   register="banger")[0] == "FAIL"
