@@ -387,6 +387,59 @@ def orphan_pronoun(draft):
     return None
 
 
+APOS = r"['\u2019]"
+
+# --- the human element -------------------------------------------------
+#
+# Measured, not asserted. Across 155 shipped drafts and 23 posts the two
+# humans actually wrote (Adi's own timeline and Lessin's), the one property
+# that separates them is whether the author is anywhere in the post:
+#
+#                       his posts     our drafts
+#   first person           43%           36%
+#   lived opener           22%            0%     <- never once
+#   a question             22%            3%
+#   stance word            26%            1%
+#   any of the four        74%           37%
+#
+# Split by register the gap stops being subtle: every banger he writes has a
+# person in it, and 2 of our 59 did. A banger is the register where he reacts
+# to something, so a banger with nobody reacting is the authorless draft that
+# reads as a machine ("Every Netflix sports doc has the GM-stares-at-a-
+# whiteboard shot now..."). Analytical posts are allowed to be impersonal:
+# three of his best are, and gating them would cost the voice more than it
+# buys. Closing-sentence length was the other candidate and it was dropped:
+# his closers and ours have the same distribution, so it measures nothing.
+FIRST_PERSON = re.compile(
+    r"\b(i|i" + APOS + r"m|i" + APOS + r"ve|i" + APOS + r"d|i" + APOS +
+    r"ll|my|me|mine)\b", re.I)
+LIVED_ENTRY = re.compile(
+    r"^(just|spent|watched|read|tried|walked|sat|been|got|ate|bought|"
+    r"after \w+ (episodes|weeks|days|years|months|minutes|hours))\b", re.I)
+STANCE = re.compile(
+    r"\b(honestly|smh|kinda|lol|unfair|i mean|not surprising|turns out|"
+    r"somehow|apparently|god damn|whatever it is)\b", re.I)
+# Only the registers where he is reacting to something. Analytical stays free.
+PRESENCE_REGISTERS = frozenset({"banger"})
+
+
+def has_presence(draft):
+    """Is the author anywhere in this post?
+
+    Four shapes, all of them his own: he says I/my, he opens on the moment he
+    met the thing ("Just watched Toy Story 5 today"), he asks the reader
+    something ("Why is everyone acting so dumb?"), or he reacts in the margin
+    ("honestly", "smh"). Any one of them is a person. None of them is a
+    machine reciting what is true about a subject."""
+    text = (draft or "").strip()
+    return bool(
+        FIRST_PERSON.search(text)
+        or LIVED_ENTRY.match(text)
+        or "?" in text
+        or STANCE.search(text)
+    )
+
+
 def motifs(text):
     """The proper nouns a draft leans on, lowercased for comparison."""
     return {
@@ -449,7 +502,7 @@ def slop_hits(draft):
 
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
-           standalone=True):
+           standalone=True, register=None):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -477,6 +530,11 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
         return "FAIL", (
             "reference used in the last {} drafts: {}".format(
                 MOTIF_LOOKBACK, ", ".join(repeats[:3]))
+        )
+    if register in PRESENCE_REGISTERS and not has_presence(draft):
+        return "FAIL", (
+            "nobody in the post: a banger is him reacting to something, so it "
+            "needs I/my, the moment he met it, a question, or a reaction"
         )
     hits = slop_hits(draft)
     if hits:
@@ -534,6 +592,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         max_chars=getattr(tenant, "max_chars", None),
         banned_motifs=recent_motifs(getattr(tenant, "generated_path", None)),
         standalone=parsed.get("standalone", True),
+        register=register,
     )
     result = {
         "verdict": verdict,
@@ -881,6 +940,32 @@ def selftest():
     assert verify_slots(two) == ["seat count", "the date"]
     assert verify_slots("[verify: lowercase works]") == ["lowercase works"]
     assert verify_slots(None) == []
+
+    # The human element, pinned to the real drafts on both sides. The first is
+    # the draft Adi pasted back ("where human element"); the rest are his.
+    authorless = ("Every Netflix sports doc has the GM-stares-at-a-whiteboard-of-names "
+                  "shot now. Drive to Survive shot it first because Ferrari and "
+                  "Mercedes refused cameras in season one and Haas had a wall.")
+    assert not has_presence(authorless)
+    for his in (
+        "After three episodes of The Pyramid Scheme my LIC agent looks suspicious "
+        "to me. The performance has broken my fraud detection. Unfair.",
+        "Just watched Toy Story 5 today, and we keep buying tickets to watch it "
+        "happen to us.",
+        "Why is everyone acting so dumb? Lenders took the actual recovery years ago.",
+        "They did build the name first, and honestly the name is doing $2B of work.",
+    ):
+        assert has_presence(his), his
+    clean = {"VOICE": 9, "TAKE": 9, "SPECIFIC": 9, "CLEAN": 9}
+    # Gated for the register where he is reacting, free everywhere else.
+    assert decide(clean, authorless, register="banger")[0] == "FAIL"
+    assert decide(clean, authorless, register="analytical")[0] == "PASS"
+    assert decide(clean, authorless, register=None)[0] == "PASS"
+    assert decide(clean, "Just read it. The fish is still dead.",
+                  register="banger")[0] == "PASS"
+    # Presence is not a licence: the other vetoes still run first.
+    assert decide(clean, "I think, honestly, this is fine " + "x" * 300,
+                  register="banger")[0] == "FAIL"
 
     print("selftest: all assertions passed")
     return ok

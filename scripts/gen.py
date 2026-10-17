@@ -60,6 +60,27 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     reg_note = REGISTER_NOTE.get(register, "Pick the register that fits per the voice card.")
     ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
     refused = "\n".join(f"- {label}" for _, label in critic.SLOP_PATTERNS)
+    # Measured on their own timeline: every banger they write has a person in
+    # it, and 2 of our 59 did. See critic.has_presence for the counts.
+    if register in critic.PRESENCE_REGISTERS:
+        presence_rule = (
+            "PUT YOURSELF IN THE POST, and this one is checked in code. A banger "
+            f"is {who} reacting to something, not an encyclopedia entry about it. "
+            "It is rejected unless it carries at least one of the four shapes they "
+            "actually use: first person (\"my LIC agent looks suspicious to me\"), "
+            "the moment they met it (\"Just watched\", \"Just read\", \"After three "
+            "episodes of\"), a question to the reader (\"Why is everyone acting so "
+            "dumb?\"), or a reaction in the margin (\"honestly\", \"smh\", \"unfair\", "
+            "\"I love it\"). A true, clever observation with nobody in it is exactly "
+            "the draft this gate exists to stop."
+        )
+    else:
+        presence_rule = (
+            "An analytical post is allowed to be impersonal: several of their best "
+            "are. But if this is something they saw, read, tried, or sat through, "
+            "start there and say so. Nothing is gained by hiding where the thought "
+            "came from."
+        )
     cooldown = ""
     if banned_motifs:
         names = ", ".join(sorted(banned_motifs)[:12])
@@ -85,7 +106,11 @@ DO NOT REUSE THEIR LINES. The voice card quotes their real sentences as the bar.
 CLEAN is the axis drafts fail on, and it is graded against this exact list. Avoid every one:
 {clean_rules}
 {clean_note}
-{dash_rule}Open with a fact, a name, or a scene, never a question.
+{dash_rule}Open on a fact, a name, a scene, or the moment you met the thing ("Just watched Toy Story 5 today", "After three episodes of The Pyramid Scheme"). A question is allowed when it is a real one you are putting to the reader; never as throat-clearing.
+
+{presence_rule}
+
+They are not a stylist. Their real posts carry contractions, an aside, a shrug, "honestly", "smh", a reaction at the end. Prose with no fingerprints on it is the tell you are trying to avoid, not the goal.
 
 IT MUST STAND ALONE. A stranger reads it cold, with nothing above it. Name who and what in the sentence that needs them: "my dog" rather than "she", the product rather than "it". A post that only makes sense to somebody who was in the room is rejected.
 
@@ -291,6 +316,14 @@ def selftest():
     finally:
         draft_post = _real_dp
         critic.grade = _real_grade
+
+    # The maker reads the same presence rule the critic enforces, per register.
+    b = build_draft_prompt("v", "t", "banger")
+    a = build_draft_prompt("v", "t", "analytical")
+    assert "PUT YOURSELF IN THE POST" in b and "checked in code" in b
+    assert "PUT YOURSELF IN THE POST" not in a
+    assert "allowed to be impersonal" in a
+    assert "never as throat-clearing" in b
 
     print("gen selftest: all assertions passed")
 
