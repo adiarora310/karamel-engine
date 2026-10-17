@@ -640,6 +640,51 @@ OTHERS_VIEW = re.compile(
     r"everyone(?:['\u2019]s| is) acting)\b", re.I)
 
 
+STANCE_WORDS = (
+    "honestly", "i wonder", "my guess", "probably", "maybe", "i think",
+    "i suspect", "i bet", "not sure", "i conclude", "odd", "kinda", "smh",
+    "no idea", "i can't tell", "i cannot tell",
+)
+
+
+def stance_words(draft):
+    """Which uncertainty markers a draft uses, lowercased."""
+    text = (draft or "").lower().replace("\u2019", "'")
+    return {w for w in STANCE_WORDS if w in text}
+
+
+def recent_stance_words(generated_path, lookback=2):
+    """The markers the last couple of drafts already leaned on.
+
+    The maker reaches for one word and keeps it: the first batch after the
+    emoji was documented ended 3 of 3 on the same 🤌🏻, and the first batch
+    after hedging was allowed opened its closer with "Honestly" in 2 of 3.
+    Hobart and Tavel vary theirs across "I wonder", "probably", "I conclude",
+    "maybe I've misunderstood", so the budget is per word, not per draft."""
+    import json as _json
+
+    path = pathlib.Path(generated_path) if generated_path else None
+    if not path or not path.exists():
+        return frozenset()
+    rows = []
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        return frozenset()
+    finals = [r.get("final") for r in rows if r.get("final")]
+    used = set()
+    for f in finals[-lookback:]:
+        used |= stance_words(f)
+    return frozenset(used)
+
+
 def thinks_in_public(draft):
     """Does the post show the thinking, or only the conclusion?
 
@@ -693,7 +738,7 @@ def slop_hits(draft):
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
-           must_think=False):
+           must_think=False, banned_stance=()):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -721,6 +766,12 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
         return "FAIL", (
             "reference used in the last {} drafts: {}".format(
                 MOTIF_LOOKBACK, ", ".join(repeats[:3]))
+        )
+    repeated = sorted(stance_words(draft) & set(banned_stance or ()))
+    if repeated:
+        return "FAIL", (
+            '"{}" again: the last posts already leaned on it, and a hedge that '
+            "repeats is a tic, not a voice".format(repeated[0])
         )
     if must_think and not thinks_in_public(draft):
         return "FAIL", (
@@ -807,6 +858,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         register=register,
         emoji_cooling=recent_closing_emoji(log_path_for_rules),
         must_think=not recent_public_thinking(log_path_for_rules),
+        banned_stance=recent_stance_words(log_path_for_rules),
     )
     result = {
         "verdict": verdict,
@@ -1207,6 +1259,13 @@ def selftest():
     assert slop_hits("Every DTC brand hides its spec sheet behind a founder "
                      "letter and calls that transparency.")
     assert not slop_hits("Most teams are just scratching the surface.")
+
+    # A hedge that repeats is a tic: same budget as the sign-off emoji.
+    assert stance_words("Honestly I respect the funnel.") == {"honestly"}
+    assert decide(clean, "Honestly I respect the funnel.",
+                  banned_stance={"honestly"})[0] == "FAIL"
+    assert decide(clean, "My guess is it goes the same way.",
+                  banned_stance={"honestly"})[0] == "PASS"
 
     # The sign-off emoji is rationed the way a signature reference is.
     assert closing_emoji("the countdown is the ad. \U0001F90C\U0001F3FB") is not None

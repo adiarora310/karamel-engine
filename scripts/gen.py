@@ -47,7 +47,7 @@ REGISTER_NOTE = {
 
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
-                       owe_thinking=False):
+                       owe_thinking=False, banned_stance=()):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -106,6 +106,14 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "name every few posts is the clearest sign a machine is writing, and "
             "it is invisible in any single draft.\n"
         )
+    if banned_stance:
+        cooldown += (
+            "\nALREADY USED AS THE HEDGE IN RECENT POSTS, so they are refused "
+            "here: " + ", ".join(f'"{w}"' for w in sorted(banned_stance)) +
+            ".\nUncertainty is welcome, the same word for it twice running is a "
+            "tic. There are plenty: I wonder, my guess, probably, no idea yet, "
+            "I can't tell, maybe I have this wrong.\n"
+        )
     fb = (f"\nThe previous draft was rejected. The single fix to make: {feedback}\n"
           "Rewrite to fix exactly that. Keep what already worked.\n" if feedback else "")
     return f"""You are drafting an original post in {who}'s voice. Their voice card is in your system prompt; obey every rule in it, especially the anti-patterns and the hard do-not lines.
@@ -140,7 +148,7 @@ Output ONLY the post text, nothing else."""
 
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
-               banned_motifs=(), owe_thinking=False):
+               banned_motifs=(), owe_thinking=False, banned_stance=()):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -149,7 +157,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
         build_draft_prompt(voice, topic, register, feedback, author=author,
                            allow_em_dash=allow_em_dash, max_chars=max_chars,
                            banned_motifs=banned_motifs,
-                           owe_thinking=owe_thinking),
+                           owe_thinking=owe_thinking,
+                           banned_stance=banned_stance),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -177,6 +186,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     log_for_rules = generated_path or getattr(tenant, "generated_path", None)
     ceiling = max_chars if max_chars is not None else getattr(tenant, "max_chars", None)
     cooling = critic.recent_motifs(log_for_rules)
+    stale_hedges = critic.recent_stance_words(log_for_rules)
 
     def regenerate(feedback):
         if feedback is None and seed is not None:
@@ -184,7 +194,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
         return draft_post(voice, topic, register, feedback, author=author,
                           allow_em_dash=allow_em_dash, tenant=tenant,
                           max_chars=ceiling, banned_motifs=cooling,
-                          owe_thinking=not critic.recent_public_thinking(log_for_rules))
+                          owe_thinking=not critic.recent_public_thinking(log_for_rules),
+                          banned_stance=stale_hedges)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
@@ -313,7 +324,7 @@ def selftest():
 
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
-                banned_motifs=(), owe_thinking=False):
+                banned_motifs=(), owe_thinking=False, banned_stance=()):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
