@@ -46,7 +46,8 @@ REGISTER_NOTE = {
 
 
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
-                       allow_em_dash=False, max_chars=None, banned_motifs=()):
+                       allow_em_dash=False, max_chars=None, banned_motifs=(),
+                       owe_thinking=False):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -61,6 +62,13 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
     # Several patterns share a label (three regexes catch throat-clearing), and
     # the brief listed it three times, which reads as emphasis nobody intended.
+    thinking_rule = ("\n\nThe last two posts were closed verdicts, so this one shows its "
+                     "working, and that is checked in code. Any one of: say where "
+                     "the thought came from (what you read, watched, sat through, "
+                     "or heard somebody say), name what you are unsure about, argue "
+                     "with a view other people hold, or ask the question you "
+                     "actually have. It is allowed to end unresolved."
+                     if owe_thinking else "")
     refused = "\n".join(
         f"- {label}" for label in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
     )
@@ -105,7 +113,7 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
 TOPIC OR SEED: {topic}
 REGISTER: {register}. {reg_note}
 
-Write ONE original post. The bar: it must LAND A TAKE, a point of view or a verdict, not just recount a fact. "This happened, then this happened" is an automatic fail. Say something only {who} would say.
+Write ONE original post. The bar: {who} has to be somewhere in the argument. "This happened, then this happened" is an automatic fail. But a verdict is only one way to clear the bar, and leaning on it is what makes these read as machine-written: a question they actually have, a disagreement with something other people believe, a speculation, or a noticing that does not resolve all count, and on the accounts this voice is modelled on (Hobart, Tavel, Lessin) that is how most posts read. Do NOT reach for the three-beat shape of fact, clever reframe, universal law. Say something only {who} would say.{thinking_rule}
 
 Zero fabrication: do not invent statistics, dates, dollar figures, or quotes. Use evergreen, widely-known facts, or where a fresh specific belongs write [VERIFY: what to confirm]. A plausible-looking invented number is worse than a VERIFY slot.
 
@@ -132,7 +140,7 @@ Output ONLY the post text, nothing else."""
 
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
-               banned_motifs=()):
+               banned_motifs=(), owe_thinking=False):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -140,7 +148,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
     out = critic.call_claude(
         build_draft_prompt(voice, topic, register, feedback, author=author,
                            allow_em_dash=allow_em_dash, max_chars=max_chars,
-                           banned_motifs=banned_motifs),
+                           banned_motifs=banned_motifs,
+                           owe_thinking=owe_thinking),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -149,7 +158,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
 
 def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
-                   critiques_path=None, allow_em_dash=False, tenant=None):
+                   critiques_path=None, allow_em_dash=False, tenant=None,
+                   max_chars=None):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -161,20 +171,24 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     # Read once per topic rather than per round: the log does not change while
     # we are drafting against it, and the maker and the grader must be looking
     # at the same cooldown or the maker gets blamed for a rule it never saw.
-    cooling = critic.recent_motifs(
-        generated_path or getattr(tenant, "generated_path", None)
-    )
+    # One path, read by both halves. `tenant` arrives as an id string from
+    # heartbeat (it goes into the log row), so the attribute fallback is only
+    # for a caller that passes the object.
+    log_for_rules = generated_path or getattr(tenant, "generated_path", None)
+    ceiling = max_chars if max_chars is not None else getattr(tenant, "max_chars", None)
+    cooling = critic.recent_motifs(log_for_rules)
 
     def regenerate(feedback):
         if feedback is None and seed is not None:
             return seed
         return draft_post(voice, topic, register, feedback, author=author,
                           allow_em_dash=allow_em_dash, tenant=tenant,
-                          max_chars=getattr(tenant, "max_chars", None),
-                          banned_motifs=cooling)
+                          max_chars=ceiling, banned_motifs=cooling,
+                          owe_thinking=not critic.recent_public_thinking(log_for_rules))
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
+                         generated_path=log_for_rules, max_chars=ceiling,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -243,7 +257,11 @@ def selftest():
     global draft_post
 
     p0 = build_draft_prompt("VOICE", "the topic", "banger")
-    assert "the topic" in p0 and "banger" in p0.lower() and "take" in p0.lower(), p0
+    # The bar used to be the word "take", which the brief no longer uses: it
+    # demanded a verdict and that is the shape being fixed.
+    assert "the topic" in p0 and "banger" in p0.lower(), p0
+    assert "somewhere in the argument" in p0, p0
+    assert "three-beat shape" in p0, p0
     p1 = build_draft_prompt("VOICE", "the topic", "analytical", feedback="add a verdict")
     assert "add a verdict" in p1, p1
 
@@ -283,7 +301,7 @@ def selftest():
 
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
-                banned_motifs=()):
+                banned_motifs=(), owe_thinking=False):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -292,7 +310,7 @@ def selftest():
 
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
-                   tenant=None, max_chars=None):
+                   tenant=None, max_chars=None, generated_path=None):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -398,10 +416,19 @@ def main():
                   file=sys.stderr)
             return 2
     try:
-        r = generate_gated(voice, topic, register=register, max_rounds=rounds,
-                           seed=seed, log=True, author=author,
-                           allow_em_dash="--allow-em-dash" in sys.argv,
-                           tenant=tenant)
+        r = generate_gated(
+            voice, topic, register=register, max_rounds=rounds, seed=seed,
+            log=True,
+            author=author or (tenant.name if tenant else None),
+            # The id, not the object: it goes into the log row verbatim and a
+            # Tenant is not JSON serializable. The rules travel as their own
+            # arguments, which is also how heartbeat calls this.
+            tenant=tenant.id if tenant else None,
+            generated_path=tenant.generated_path if tenant else None,
+            critiques_path=tenant.critiques_path if tenant else None,
+            max_chars=tenant.max_chars if tenant else None,
+            allow_em_dash=(tenant.allow_em_dash if tenant
+                           else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:
         # Every one of these is a condition someone can act on: no credit, a bad
         # key, an unreachable API. Printing a traceback for them buries the one

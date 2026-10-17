@@ -88,7 +88,20 @@ DEFAULT_MAX_CHARS = 280
 #: noticing them, quoting them exactly, and spending two of its ten points. Here
 #: they are a veto, which is what they deserve: no amount of good take makes
 #: "it's not X, it's Y" sound like a person wrote it.
+# Closing on a law of the universe ("Every DTC brand hides its spec sheet...").
+# 13% of our drafts end this way against 5% of the reference writers': it is how
+# a model signals profundity when the thought is finished and the post is not.
+# Length matters: Sarah Tavel closes a real post on "Most teams are just
+# scratching the surface." (7 words) and that is a plain claim, not a
+# pronouncement. Every one of ours is 14 words or longer, so the pattern wants
+# at least 11 words after the opener.
+UNIVERSAL_CLOSER = (
+    r"(?m)(?:^|(?<=[.!?]\s))(?:Every|Most|Any|All|Anyone|Everyone|Nobody|Each)\b"
+    r"(?:\s+[^\s.!?]+){11,}[.!?]?\s*$"
+)
+
 SLOP_PATTERNS = (
+    (UNIVERSAL_CLOSER, "universal-law closer"),
     # Apostrophes come in both shapes because the maker writes curly ones and a
     # person pasting an edit writes straight ones, and a pattern that only
     # catches one of them catches half the drafts.
@@ -164,7 +177,7 @@ STANDALONE is a yes/no, judged before the axes. A post is read cold by a strange
 
 Score each axis 1 to 10:
 - VOICE: matches the card's texture, register, openers, and rules.
-- TAKE: lands a point of view, an angle, or a verdict. A draft that recounts true facts with no angle scores LOW here. This is the most important axis. "This happened, then this happened" is a fail.
+- TAKE: the writer is somewhere in the argument. A verdict is one way; so is a question they actually have, a disagreement with a view other people hold, a speculation ("I wonder if"), or a noticing that does not resolve. A draft that recounts true facts with no angle scores LOW. "This happened, then this happened" is a fail. So is the opposite failure, and it is the common one here: a closed three-beat ruling (fact, clever reframe, universal law) with nothing unresolved and nobody to disagree with. Measured against the writers this account is modelled on, 55% of their posts show the thinking rather than only the conclusion; do not reward a draft for sounding finished.
 - SPECIFIC: contains at least one concrete number, name, or exact detail.
 
 CLEANLINESS IS NOT SCORED BY YOU. You report evidence and the score is computed from it. List every AI tell you find, and for each one QUOTE THE OFFENDING TEXT VERBATIM from the draft. A tell you cannot quote does not count and will be discarded, so do not report an impression. Quote the shortest span that contains the problem.
@@ -529,6 +542,81 @@ def recent_closing_emoji(generated_path, lookback=EMOJI_LOOKBACK):
     return any(closing_emoji(r.get("final")) for r in finals[-lookback:])
 
 
+# --- thinking in public ------------------------------------------------
+#
+# Measured against the writers the card names as the models (Hobart, Tavel,
+# Lessin) and against Adi's own timeline, next to 155 shipped drafts:
+#
+#                                  them    his    ours
+#   says where the thought came from  32%    29%     3%
+#   hedge or uncertainty anywhere     23%    18%     5%
+#   a question anywhere               23%    22%     3%
+#   argues with a view people hold     9%    12%     1%
+#   any of the four                   55%    53%    17%
+#
+# Byrne Hobart is named on the card as the closest stylistic neighbour and
+# not one of his top posts is the shape this engine produces: they are
+# wonderings, questions, jokes, and arguments with somebody. Ours are closed
+# three-beat rulings, because the maker's brief demanded a verdict and the
+# TAKE axis rewarded one.
+#
+# 45% of their posts have none of the four, so this cannot be a per-draft
+# veto without flattening the voice the other way. It is a quota instead:
+# three closed verdicts in a row is a feed with a tic, so after two the next
+# draft has to show its working.
+PUBLIC_LOOKBACK = 2
+HEDGE = re.compile(
+    r"\b(i wonder|probably|maybe|my guess|i think|i suspect|i bet|seems|"
+    r"might|could be wrong|not sure|i conclude|honestly|odd)\b", re.I)
+PROVENANCE = re.compile(
+    r"\b(was talking to|i hear|i keep hearing|i see a lot of people|OH:|"
+    r"tried to|just read|just watched|just saw|looking at|i am reading|"
+    r"somebody asked|read this|spent|walked into|lost another|sat through|"
+    r"after \w+ episodes)\b", re.I)
+OTHERS_VIEW = re.compile(
+    r"\b(many people|a lot of people|everyone says|people predict|"
+    r"the consensus|most people (?:think|say)|the standard take|"
+    r"everyone(?:['\u2019]s| is) acting)\b", re.I)
+
+
+def thinks_in_public(draft):
+    """Does the post show the thinking, or only the conclusion?
+
+    Four shapes, all taken off the reference writers: it says where the
+    thought came from, it is uncertain about something, it asks a real
+    question, or it argues with a view other people hold."""
+    text = draft or ""
+    return bool(
+        PROVENANCE.search(text) or HEDGE.search(text)
+        or "?" in text or OTHERS_VIEW.search(text)
+    )
+
+
+def recent_public_thinking(generated_path, lookback=PUBLIC_LOOKBACK):
+    """True if any of the last few shipped drafts showed its working."""
+    import json as _json
+
+    path = pathlib.Path(generated_path) if generated_path else None
+    if not path or not path.exists():
+        return True  # no log, no quota: never block drafting on a missing file
+    rows = []
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        return True
+    finals = [r.get("final") for r in rows if r.get("final")]
+    if len(finals) < lookback:
+        return True
+    return any(thinks_in_public(f) for f in finals[-lookback:])
+
+
 def slop_hits(draft):
     """The refused constructions present in a draft, as (quote, label) pairs.
 
@@ -543,7 +631,8 @@ def slop_hits(draft):
 
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
-           standalone=True, register=None, emoji_cooling=False):
+           standalone=True, register=None, emoji_cooling=False,
+           must_think=False):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -571,6 +660,12 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
         return "FAIL", (
             "reference used in the last {} drafts: {}".format(
                 MOTIF_LOOKBACK, ", ".join(repeats[:3]))
+        )
+    if must_think and not thinks_in_public(draft):
+        return "FAIL", (
+            "the last two posts were closed verdicts and so is this one: show "
+            "the thinking (where it came from, what is uncertain, the view "
+            "being argued with, or the question actually being asked)"
         )
     if emoji_cooling and closing_emoji(draft):
         return "FAIL", (
@@ -609,7 +704,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
 
 def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
-          effort=None):
+          effort=None, generated_path=None, max_chars=None):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -633,14 +728,24 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
             append_jsonl(log_path, result)
         return result
     parsed = parse_verdict(out, draft=draft)
+    # **The seam that made every cooldown here inert.** Callers pass `tenant`
+    # as the tenant *id* (heartbeat passes tenant.id, so the log row stays
+    # JSON), and getattr("adi", "generated_path", None) is None, so the motif
+    # budget, the emoji budget and the thinking quota all read an empty log and
+    # waved everything through. Only the maker side saw them, because gen
+    # passes the path explicitly. The path and the ceiling now arrive as
+    # arguments, and the tenant attribute is the fallback for a caller that
+    # hands over the object.
+    log_path_for_rules = generated_path or getattr(tenant, "generated_path", None)
+    ceiling = max_chars if max_chars is not None else getattr(tenant, "max_chars", None)
     verdict, override = decide(
         parsed["scores"], draft, allow_em_dash=allow_em_dash,
-        max_chars=getattr(tenant, "max_chars", None),
-        banned_motifs=recent_motifs(getattr(tenant, "generated_path", None)),
+        max_chars=ceiling,
+        banned_motifs=recent_motifs(log_path_for_rules),
         standalone=parsed.get("standalone", True),
         register=register,
-        emoji_cooling=recent_closing_emoji(
-            getattr(tenant, "generated_path", None)),
+        emoji_cooling=recent_closing_emoji(log_path_for_rules),
+        must_think=not recent_public_thinking(log_path_for_rules),
     )
     result = {
         "verdict": verdict,
@@ -1011,6 +1116,26 @@ def selftest():
     assert decide(clean, authorless, register=None)[0] == "PASS"
     assert decide(clean, "Just read it. The fish is still dead.",
                   register="banger")[0] == "PASS"
+    # Thinking in public: a quota, not a veto, and it reads the four shapes.
+    assert thinks_in_public("I wonder if the tax planning move is a foundation.")
+    assert thinks_in_public("Was talking to a founder and noticed something.")
+    assert thinks_in_public("Have any of the labs tried this in history?")
+    assert thinks_in_public("A lot of people predict this future. I don't.")
+    assert not thinks_in_public(
+        "Nike walked back into Foot Locker after cutting wholesale. The margin "
+        "went straight to Meta's ad auction.")
+    assert decide(clean, "Nike walked back into Foot Locker.",
+                  must_think=True)[0] == "FAIL"
+    assert decide(clean, "Nike walked back into Foot Locker.",
+                  must_think=False)[0] == "PASS"
+    assert decide(clean, "I wonder why Nike walked back into Foot Locker.",
+                  must_think=True)[0] == "PASS"
+    # The pronouncement closer, which fires on 17% of our drafts and none of
+    # theirs. Tavel's own 7-word "Most teams are..." closer must survive.
+    assert slop_hits("Every DTC brand hides its spec sheet behind a founder "
+                     "letter and calls that transparency.")
+    assert not slop_hits("Most teams are just scratching the surface.")
+
     # The sign-off emoji is rationed the way a signature reference is.
     assert closing_emoji("the countdown is the ad. \U0001F90C\U0001F3FB") is not None
     assert closing_emoji("no emoji here.") is None
