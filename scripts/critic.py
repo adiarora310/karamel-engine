@@ -25,6 +25,7 @@ CLI:
   --demo                              grade a known-good and a known-flat line
   --selftest                          run the pure-logic unit tests, no claude
 """
+import pathlib
 import re
 import subprocess
 import sys
@@ -45,8 +46,58 @@ CRITIQUES = DATA / "critiques.jsonl"
 # everybody who received a copy.
 
 # PASS bar. TAKE is mandatory and high: a draft with no point of view does not ship.
-THRESHOLDS = {"VOICE": 7, "TAKE": 7, "SPECIFIC": 6, "CLEAN": 8}
+#
+# **Rebalanced 2026-10-17, from 460 graded rounds on the host.** CLEAN at 8 was
+# the sole reason for 189 of 317 failures, 60% of everything rejected, while
+# VOICE, TAKE and SPECIFIC averaged 7.9, 8.1 and 7.8 and almost never blocked
+# anything. CLEAN is computed as 10 minus 2 per quoted tell, so two tells killed
+# a draft however good its take was, and the gate most responsible for rejection
+# was the one least connected to whether a post lands.
+#
+# The subjective tell-hunt now costs less, and the constructions that genuinely
+# read as machine-written are refused deterministically instead (SLOP_PATTERNS
+# below), where a model cannot be talked out of them and cannot invent new ones.
+THRESHOLDS = {"VOICE": 6, "TAKE": 7, "SPECIFIC": 6, "CLEAN": 6}
 AXES = ("VOICE", "TAKE", "SPECIFIC", "CLEAN")
+
+#: Hard character ceiling for a draft, when the tenant does not set its own.
+#:
+#: There was no length gate at all until now, which is why the median draft ran
+#: to 746 characters and the median across rounds to 1,052. Nothing in the maker
+#: or the grader ever mentioned length, so the model wrote essays and the critic
+#: graded their phrasing.
+#:
+#: 280 is the native unit of the platform: it is what a reader sees without
+#: pressing "Show more", and it is short enough that a draft must choose one
+#: idea. **It is a starting number, not a measured one.** Karamel has never
+#: recorded how a post performed, so nothing here is fitted to engagement; a
+#: tenant can set `max_chars` and the number should move once real data exists.
+DEFAULT_MAX_CHARS = 280
+
+#: Constructions that read as machine-written, refused in Python rather than
+#: scored by a model.
+#:
+#: These were all on the CLEAN rubric already, where they depended on the grader
+#: noticing them, quoting them exactly, and spending two of its ten points. Here
+#: they are a veto, which is what they deserve: no amount of good take makes
+#: "it's not X, it's Y" sound like a person wrote it.
+SLOP_PATTERNS = (
+    # Apostrophes come in both shapes because the maker writes curly ones and a
+    # person pasting an edit writes straight ones, and a pattern that only
+    # catches one of them catches half the drafts.
+    (r"(?i)\bit['\u2019]?s not (?:just )?(?:about )?[^.!?]{1,45}, it['\u2019]?s\b",
+     "not-X-it's-Y contrast"),
+    (r"(?i)\bhere (?:is|['\u2019]s) the thing\b", "throat-clearing opener"),
+    (r"(?i)^\s*here['\u2019]?s (?:what|why)\b", "throat-clearing opener"),
+    (r"(?i)\bthe thing is,", "throat-clearing opener"),
+    (r"(?i)\bthe (?:real|bigger|actual) question is\b", "rhetorical pivot"),
+    (r"(?i)\bthat['\u2019]?s the (?:whole |real )?(?:point|difference|story)\.?\s*$",
+     "summarising last line"),
+    (r"(?i)\b(?:this|that|it) (?:is|was)n['\u2019]?t (?:just )?about\b", "isn't-about setup"),
+    (r"(?i)\blet that sink in\b", "engagement-bait closer"),
+    (r"(?i)\bin (?:today['\u2019]?s|this) (?:fast[- ]paced |rapidly )?(?:world|landscape|era)\b",
+     "essay opener"),
+)
 
 
 # CLEAN-axis tells distilled from the stop-slop skill (~/.agents/skills/stop-slop/SKILL.md).
@@ -222,7 +273,82 @@ def verify_slots(draft):
     return [m.strip() for m in VERIFY_RE.findall(draft or "")]
 
 
-def decide(scores, draft, allow_em_dash=False):
+#: Capitalised words that start sentences or are grammar rather than reference.
+#: Without this list every draft "uses the motif The".
+MOTIF_STOPWORDS = frozenset({
+    "The", "This", "That", "These", "Those", "They", "There", "Then", "Their",
+    "Every", "Most", "Nobody", "Everyone", "Some", "Many", "You", "Your", "It",
+    "If", "When", "What", "Which", "Who", "Why", "How", "And", "But", "For",
+    "Not", "Now", "One", "Two", "Three", "First", "Last", "Here", "His", "Her",
+    "Its", "Our", "We", "Was", "Were", "Are", "Is", "Be", "Been", "Had", "Has",
+    "Have", "Will", "Would", "Can", "Could", "Should", "A", "An", "In", "On",
+    "At", "By", "To", "Of", "So", "No", "Yes", "After", "Before", "Once",
+})
+
+MOTIF_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
+
+#: How many recent drafts a reference is locked out for once it is used.
+#:
+#: **Measured, not guessed.** Across 143 shipped drafts for one tenant, "Rams"
+#: appeared in 60 of them, 42%, with "Dieter" in 9% and "Braun" in 6%. Nearly
+#: every second post reached for the same man. Each draft was individually fine
+#: and the set read as a machine with one trick, which is the failure a per-draft
+#: grader structurally cannot see: it is only visible across a feed.
+MOTIF_LOOKBACK = 5
+
+
+def motifs(text):
+    """The proper nouns a draft leans on, lowercased for comparison."""
+    return {
+        w.lower() for w in MOTIF_RE.findall(text or "")
+        if w not in MOTIF_STOPWORDS
+    }
+
+
+def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
+    """Everything the last few shipped drafts already used.
+
+    Reads the tenant's own generated log rather than taking an argument from the
+    caller, because the caller that forgets to pass it gets no cooldown and
+    nothing says so. Missing or unreadable file means an empty set: a cooldown
+    that cannot be computed must not block drafting."""
+    import json as _json
+
+    path = pathlib.Path(generated_path) if generated_path else None
+    if not path or not path.exists():
+        return frozenset()
+    rows = []
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except ValueError:
+                continue
+    except OSError:
+        return frozenset()
+    used = set()
+    for row in [r for r in rows if r.get("final")][-lookback:]:
+        used |= motifs(row.get("final"))
+    return frozenset(used)
+
+
+def slop_hits(draft):
+    """The refused constructions present in a draft, as (quote, label) pairs.
+
+    Quoted like the model's tells are quoted, and for the same reason: a
+    rejection somebody cannot point at is a rejection they cannot act on."""
+    hits = []
+    for pattern, label in SLOP_PATTERNS:
+        m = re.search(pattern, draft or "", re.MULTILINE)
+        if m:
+            hits.append((m.group(0).strip(), label))
+    return hits
+
+
+def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=()):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -232,6 +358,23 @@ def decide(scores, draft, allow_em_dash=False):
     sounds like them rejected here before the model's verdict was even read."""
     if not allow_em_dash and has_em_dash(draft):
         return "FAIL", "em-dash present (tenant rule, deterministic)"
+    # Length before anything a model said. A 900-character draft is not a post
+    # that needs tightening, it is the wrong artefact, and sending it back with
+    # the count is the feedback that fixes it.
+    ceiling = int(max_chars or DEFAULT_MAX_CHARS)
+    if draft and len(draft.strip()) > ceiling:
+        return "FAIL", f"too long: {len(draft.strip())} chars, ceiling {ceiling}"
+    repeats = sorted(motifs(draft) & set(banned_motifs or ()))
+    if repeats:
+        return "FAIL", (
+            "reference used in the last {} drafts: {}".format(
+                MOTIF_LOOKBACK, ", ".join(repeats[:3]))
+        )
+    hits = slop_hits(draft)
+    if hits:
+        return "FAIL", "refused construction: " + "; ".join(
+            f"{label} ({quote[:40]})" for quote, label in hits[:2]
+        )
     # A draft that still names a blank is not finished. The maker is allowed to
     # write [VERIFY: median seed] rather than invent a number it cannot know,
     # which is the right instinct and the reason the marker exists: the
@@ -278,7 +421,11 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
             append_jsonl(log_path, result)
         return result
     parsed = parse_verdict(out, draft=draft)
-    verdict, override = decide(parsed["scores"], draft, allow_em_dash=allow_em_dash)
+    verdict, override = decide(
+        parsed["scores"], draft, allow_em_dash=allow_em_dash,
+        max_chars=getattr(tenant, "max_chars", None),
+        banned_motifs=recent_motifs(getattr(tenant, "generated_path", None)),
+    )
     result = {
         "verdict": verdict,
         "scores": parsed["scores"],
@@ -487,7 +634,9 @@ def selftest():
     assert got[0] is None, got                      # first call is the initial draft
     assert "none" != (got[1] or "").strip().lower(), got
     assert "CLEAN scored 4" in got[1], got[1]       # says the axis that actually failed
-    assert "needs 8" in got[1], got[1]
+    # Reads the bar from THRESHOLDS rather than pinning a literal. The number
+    # moved on 2026-10-17 and this assertion was the only thing that noticed.
+    assert f"needs {THRESHOLDS['CLEAN']}" in got[1], got[1]
 
     # grade returns ERROR, never PASS, when the critic call itself fails.
     _real_cc = call_claude

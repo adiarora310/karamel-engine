@@ -120,6 +120,11 @@ DEFAULTS = {
     # would have had every characteristic draft either mangled or rejected, with
     # the voice card saying one thing and a deterministic check overruling it.
     "allow_em_dash": False,
+    # The character ceiling for an original. None means critic.DEFAULT_MAX_CHARS,
+    # which is the platform's native unit rather than a measured optimum: see the
+    # note there. Per tenant because the right length is a property of whose
+    # audience is reading, and the only way to find it is to watch one.
+    "max_chars": None,
 }
 
 _SLUG_RE = re.compile(r"[^a-z0-9-]+")
@@ -150,6 +155,8 @@ class Tenant:
         )
         self.reply_mining = data.get("reply_mining", DEFAULTS["reply_mining"])
         self.allow_em_dash = data.get("allow_em_dash", DEFAULTS["allow_em_dash"])
+        raw_max = data.get("max_chars", DEFAULTS["max_chars"])
+        self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
         # default and deliberately NOT inherited: heartbeat's module-level
         # SEED_TOPICS are Adi's interests (Dieter Rams, founder posts, the

@@ -46,7 +46,7 @@ REGISTER_NOTE = {
 
 
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
-                       allow_em_dash=False):
+                       allow_em_dash=False, max_chars=None, banned_motifs=()):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -58,6 +58,17 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     dash_rule = ("" if allow_em_dash else
                  "No em-dashes or en-dashes. ")
     reg_note = REGISTER_NOTE.get(register, "Pick the register that fits per the voice card.")
+    ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
+    refused = "\n".join(f"- {label}" for _, label in critic.SLOP_PATTERNS)
+    cooldown = ""
+    if banned_motifs:
+        names = ", ".join(sorted(banned_motifs)[:12])
+        cooldown = (
+            "\nALREADY USED IN RECENT POSTS, so they are refused here: "
+            f"{names}.\nReach for a different reference. Returning to the same "
+            "name every few posts is the clearest sign a machine is writing, and "
+            "it is invisible in any single draft.\n"
+        )
     fb = (f"\nThe previous draft was rejected. The single fix to make: {feedback}\n"
           "Rewrite to fix exactly that. Keep what already worked.\n" if feedback else "")
     return f"""You are drafting an original post in {who}'s voice. Their voice card is in your system prompt; obey every rule in it, especially the anti-patterns and the hard do-not lines.
@@ -75,19 +86,26 @@ CLEAN is the axis drafts fail on, and it is graded against this exact list. Avoi
 {clean_rules}
 {clean_note}
 {dash_rule}Open with a fact, a name, or a scene, never a question.
-{fb}
+
+LENGTH IS A HARD GATE: {ceiling} characters, counted. A draft over it is rejected before anything else is read, so write to the limit rather than trimming afterwards. This is a post, not an essay: one idea, said once. Do not add a closing line that restates what you already said.
+
+These constructions are refused deterministically. A draft containing one is rejected no matter how good it is:
+{refused}
+{cooldown}{fb}
 Output ONLY the post text, nothing else."""
 
 
 def draft_post(voice, topic, register, feedback=None, author=None,
-               allow_em_dash=False, tenant=None):
+               allow_em_dash=False, tenant=None, max_chars=None,
+               banned_motifs=()):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
     draft that read like them, and nothing in the output showed why."""
     out = critic.call_claude(
         build_draft_prompt(voice, topic, register, feedback, author=author,
-                           allow_em_dash=allow_em_dash),
+                           allow_em_dash=allow_em_dash, max_chars=max_chars,
+                           banned_motifs=banned_motifs),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -105,12 +123,20 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     in and graded against, and where the artefacts land. Defaulting them keeps
     the bare CLI working; heartbeat passes a tenant's."""
     journey = []
+    # Read once per topic rather than per round: the log does not change while
+    # we are drafting against it, and the maker and the grader must be looking
+    # at the same cooldown or the maker gets blamed for a rule it never saw.
+    cooling = critic.recent_motifs(
+        generated_path or getattr(tenant, "generated_path", None)
+    )
 
     def regenerate(feedback):
         if feedback is None and seed is not None:
             return seed
         return draft_post(voice, topic, register, feedback, author=author,
-                          allow_em_dash=allow_em_dash, tenant=tenant)
+                          allow_em_dash=allow_em_dash, tenant=tenant,
+                          max_chars=getattr(tenant, "max_chars", None),
+                          banned_motifs=cooling)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
@@ -221,15 +247,17 @@ def selftest():
     seq = {"n": 0, "authors": [], "paths": []}
 
     def fake_dp(voice, topic, register, feedback=None, author=None,
-                allow_em_dash=False, tenant=None):
+                allow_em_dash=False, tenant=None, max_chars=None,
+                banned_motifs=()):
         seq["n"] += 1
+        seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         return "flat draft" if seq["n"] == 1 else "sharp draft"
 
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
-                   tenant=None):
+                   tenant=None, max_chars=None):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
