@@ -320,6 +320,62 @@ SIGNATURE_MOTIFS = frozenset({"rams", "dieter", "braun", "ring"})
 SIGNATURE_LOOKBACK = 20
 
 
+#: Third-person pronouns that need somebody named before them.
+#:
+#: **Gendered only, measured against the corpus.** Including they/them/their
+#: flagged 17 of 143 shipped drafts, and reading them, most were right: "hardware
+#: startups ... they die eight months later" needs no person. Gendered pronouns
+#: flag 3 of 143 and still catch the draft this rule was written for. The plural
+#: and neuter cases are left to the model's STANDALONE judgment, which is weaker
+#: but is not wrong three times in every hundred.
+PRONOUNS = re.compile(r"\b(she|he|her|him|hers)\b", re.I)
+
+#: Nouns that can own a pronoun, and they only count when something marks them
+#: as a thing in the scene rather than a word in a phrase.
+#:
+#: The first version matched any of these anywhere, so "hardware user research"
+#: supplied an antecedent for "she" and the draft this whole rule exists to
+#: catch sailed through. A bare noun inside a compound is not somebody; "my
+#: dog", "the founder" and a plural like "fans" are.
+ANIMATE_SINGULAR = (
+    "dog|puppy|cat|wife|husband|partner|son|daughter|kid|child|baby|mom|mother|"
+    "dad|father|friend|founder|ceo|cto|coo|investor|operator|customer|buyer|"
+    "user|fan|teammate|player|coach|neighbour|neighbor|barista|owner|client|"
+    "student|engineer|guy|woman|man|kid"
+)
+ANIMATE_PLURAL = (
+    "dogs|kids|children|founders|investors|operators|customers|buyers|users|"
+    "fans|people|teammates|players|coaches|owners|clients|students|engineers|"
+    "women|men|parents|employees"
+)
+ANIMATE = re.compile(
+    r"(?:\b(?:my|our|his|her|their|your|the|a|an|this|that|one|another)\s+"
+    r"(?:\w+\s+){0,1}(?:" + ANIMATE_SINGULAR + r")\b)"
+    r"|(?:\b(?:" + ANIMATE_PLURAL + r")\b)",
+    re.I,
+)
+FULL_NAME = re.compile(r"\b[A-Z][a-z]+\s+[A-Z][a-z]+\b")
+
+
+def orphan_pronoun(draft):
+    """The first pronoun with nobody named before it, or None.
+
+    **The deterministic half of the standalone rule.** The model judges this
+    well and not reliably: asked twice about the same draft, the grader called
+    it NO here and YES during the run that shipped it, which is the failure mode
+    of putting a binary veto inside a generation. So the clearest case is caught
+    in Python, where the answer does not change between runs, and the model
+    keeps the cases a regex cannot see.
+    """
+    text = draft or ""
+    for m in PRONOUNS.finditer(text):
+        before = text[:m.start()]
+        if ANIMATE.search(before) or FULL_NAME.search(before):
+            return None
+        return m.group(0)
+    return None
+
+
 def motifs(text):
     """The proper nouns a draft leans on, lowercased for comparison."""
     return {
@@ -356,10 +412,15 @@ def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
     used = set()
     for row in finals[-lookback:]:
         used |= motifs(row.get("final"))
-    # A signature counts for much longer, so one appearance in the last twenty
-    # drafts locks it even though it has fallen out of the rolling window.
+    # **The signatures share one budget.** Tracking them separately let a batch
+    # of five drafts spend Rams on the first and Ring on the third, which is
+    # precisely the complaint ("each one has either Ring or Rams"). Any one of
+    # them inside the window locks all of them, so the feed goes twenty drafts
+    # between visits to that corner of the persona rather than twenty per name.
     for row in finals[-SIGNATURE_LOOKBACK:]:
-        used |= (motifs(row.get("final")) & SIGNATURE_MOTIFS)
+        if motifs(row.get("final")) & SIGNATURE_MOTIFS:
+            used |= SIGNATURE_MOTIFS
+            break
     return frozenset(used)
 
 
@@ -393,6 +454,11 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
     ceiling = int(max_chars or DEFAULT_MAX_CHARS)
     if draft and len(draft.strip()) > ceiling:
         return "FAIL", f"too long: {len(draft.strip())} chars, ceiling {ceiling}"
+    orphan = orphan_pronoun(draft)
+    if orphan:
+        return "FAIL", (
+            f'"{orphan}" with nobody named before it: a cold reader cannot tell who'
+        )
     if not standalone:
         return "FAIL", "needs context a stranger does not have"
     repeats = sorted(motifs(draft) & set(banned_motifs or ()))
