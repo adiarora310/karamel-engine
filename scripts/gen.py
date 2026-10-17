@@ -59,7 +59,11 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                  "No em-dashes or en-dashes. ")
     reg_note = REGISTER_NOTE.get(register, "Pick the register that fits per the voice card.")
     ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
-    refused = "\n".join(f"- {label}" for _, label in critic.SLOP_PATTERNS)
+    # Several patterns share a label (three regexes catch throat-clearing), and
+    # the brief listed it three times, which reads as emphasis nobody intended.
+    refused = "\n".join(
+        f"- {label}" for label in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
+    )
     # Measured on their own timeline: every banger they write has a person in
     # it, and 2 of our 59 did. See critic.has_presence for the counts.
     if register in critic.PRESENCE_REGISTERS:
