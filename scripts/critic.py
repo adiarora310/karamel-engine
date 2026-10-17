@@ -453,12 +453,73 @@ def has_presence(draft):
     )
 
 
+#: The system word list, used to tell a proper noun from an ordinary word that
+#: happens to start a sentence. Present on macOS (a symlink to web2) and read
+#: once; None when it is missing, and the morphology rules below carry on alone.
+_WORDLIST = None
+_WORDLIST_READ = False
+
+
+def _common_words():
+    global _WORDLIST, _WORDLIST_READ
+    if not _WORDLIST_READ:
+        _WORDLIST_READ = True
+        try:
+            _WORDLIST = frozenset(
+                w.strip().lower()
+                for w in pathlib.Path("/usr/share/dict/words").read_text(
+                    errors="ignore").splitlines() if w.strip()
+            )
+        except OSError:
+            _WORDLIST = None
+    return _WORDLIST
+
+
+SENTENCE_START = re.compile(r"(?:^|(?<=[.!?])\s+|^\s*)")
+INFLECTED = re.compile(r".+(ing|ed|ly)$", re.I)
+
+
 def motifs(text):
-    """The proper nouns a draft leans on, lowercased for comparison."""
-    return {
-        w.lower() for w in MOTIF_RE.findall(text or "")
-        if w not in MOTIF_STOPWORDS
-    }
+    """The proper nouns a draft leans on, lowercased for comparison.
+
+    **A capital letter is not evidence at the start of a sentence.** Every
+    sentence-initial word is capitalised, so "Just watched...", "Walked into
+    ...", "People keep calling it a retreat" banked *just*, *walked* and
+    *people* as references, and the next five drafts could not use those words
+    at all. It bit hardest right after the lived-opener rule landed, because
+    that rule asks for exactly those openers. A sentence-initial word now has
+    to earn its place: an acronym (DSW), a name that recurs mid-sentence, or
+    one followed by another capital (Taylor Swift) counts; anything the system
+    dictionary knows, or that looks inflected, does not."""
+    text = text or ""
+    starts = {m.end() for m in re.finditer(r"(?:^|[.!?]\s+)", text)}
+    found = [(m.start(), m.group(1)) for m in MOTIF_RE.finditer(text)]
+    mid = {w for pos, w in found if pos not in starts}
+    common = _common_words()
+    out = set()
+    for pos, w in found:
+        if w in MOTIF_STOPWORDS:
+            continue
+        if pos in starts:
+            tail = text[pos + len(w):pos + len(w) + 24]
+            earned = (
+                w.isupper()                              # DSW, NBA, EFL
+                or w in mid                              # recurs mid-sentence
+                or bool(re.match(r"\s+[A-Z][a-z]", tail))  # Taylor Swift
+                # "Ring" is both a signature and an ordinary word, and the
+                # dictionary cannot tell them apart. The signatures are the
+                # references this budget exists for, so they always count.
+                or w.lower() in SIGNATURE_MOTIFS
+            )
+            if not earned:
+                if INFLECTED.match(w):
+                    continue
+                if common is not None and w.lower() in common:
+                    continue
+                if common is None:
+                    continue
+        out.add(w.lower())
+    return out
 
 
 def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
@@ -1116,6 +1177,17 @@ def selftest():
     assert decide(clean, authorless, register=None)[0] == "PASS"
     assert decide(clean, "Just read it. The fish is still dead.",
                   register="banger")[0] == "PASS"
+    # A capital letter at the start of a sentence is not a proper noun.
+    assert "people" not in motifs("People keep calling it a retreat.")
+    assert "just" not in motifs("Just watched my fourth Criterion Closet video.")
+    assert "walked" not in motifs("Walked into my fourth coffee shop this week.")
+    assert "criterion" in motifs("Just watched my fourth Criterion Closet video.")
+    assert "nike" in motifs("Nike spent years going direct. Nike came back.")
+    assert "dsw" in motifs("DSW shelves filled up again.")
+    assert {"taylor", "swift"} <= motifs("Taylor Swift bought the masters back.")
+    assert "ring" in motifs("Ring shipped a doorbell."), "signatures always count"
+    assert "michelin" in motifs("Michelin gave it a star.")
+
     # Thinking in public: a quota, not a veto, and it reads the four shapes.
     assert thinks_in_public("I wonder if the tax planning move is a foundation.")
     assert thinks_in_public("Was talking to a founder and noticed something.")

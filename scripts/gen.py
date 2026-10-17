@@ -240,9 +240,21 @@ def _print_result(r):
             print(f"           ({claimed - len(tells)} more claimed but not "
                   f"quotable from the draft, so not counted)")
         if j["verdict"] != "PASS":
+            # The deterministic veto, printed first and on its own line.
+            # Without it the CLI showed a draft scoring 8/8/7/10 with the
+            # critic writing "fix: none" and a FAIL verdict, and the actual
+            # reason (a motif under cooldown) was nowhere on screen.
+            if j.get("override"):
+                print(f"    VETO:  {j['override']}")
             print(f"    why:   {j['why']}")
             print(f"    fix:   {j['fix']}")
     print(f"\n=== FINAL ({r['verdict']}, {r['rounds']} refine round(s)) ===")
+    if r["verdict"] != "PASS":
+        vetoes = [j["override"] for j in r["journey"] if j.get("override")]
+        if vetoes and all(v == vetoes[0] for v in vetoes):
+            # Every round died on the same deterministic rule: that is a topic
+            # the maker cannot win, not a draft it keeps getting wrong.
+            print(f"    every round died on the same rule: {vetoes[0]}")
     if r["verdict"] == "PASS":
         print(r["final"])
     elif r["verdict"] == "ERROR":
