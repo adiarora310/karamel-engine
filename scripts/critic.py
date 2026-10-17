@@ -35,7 +35,14 @@ import tenants
 
 from karamel_common import DATA, ROOT, has_em_dash, now_iso, append_jsonl
 
-VERIFY_RE = re.compile(r"\[VERIFY:\s*([^\]]*)\]", re.IGNORECASE)
+#: The unfilled-blank marker, in both shapes the maker actually writes.
+#:
+#: It matched only "[VERIFY: what to confirm]". A draft on 2026-10-17 shipped
+#: carrying two bare "[VERIFY]" markers straight to the approval inbox, because
+#: the colon is what the pattern keyed on and the maker had dropped it. The
+#: whole point of the gate is that the literal marker must never reach somebody
+#: one tap from publishing it, so the colon and the description are now optional.
+VERIFY_RE = re.compile(r"\[VERIFY(?::\s*([^\]]*))?\]", re.IGNORECASE)
 VOICE_CARD = ROOT / "03_voice_card.md"
 CRITIQUES = DATA / "critiques.jsonl"
 
@@ -278,8 +285,12 @@ def parse_verdict(out, draft=None):
 
 
 def verify_slots(draft):
-    """The [VERIFY: ...] asks in a draft, in order. Empty list if none."""
-    return [m.strip() for m in VERIFY_RE.findall(draft or "")]
+    """The [VERIFY] asks in a draft, in order. Empty list if none.
+
+    A bare marker has no description, and it is still a blank: it comes back as
+    "unnamed blank" rather than as an empty string, so the message the maker
+    gets names something."""
+    return [(m or "").strip() or "unnamed blank" for m in VERIFY_RE.findall(draft or "")]
 
 
 #: Capitalised words that start sentences or are grammar rather than reference.
