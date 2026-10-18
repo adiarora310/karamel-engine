@@ -76,31 +76,34 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     # Measured on their own timeline: every banger they write has a person in
     # it, and 2 of our 59 did. See critic.has_presence for the counts.
     if register in critic.PRESENCE_REGISTERS:
+        # **No one person's lines in here.** This brief goes to every tenant,
+        # and it used to quote Adi's posts as the examples ("my LIC agent looks
+        # suspicious to me", "Just watched", "honestly", "smh"): Khoa's first
+        # three drafts came back saying "Honestly" and "My guess", which are
+        # Adi's hedges, not his. The shapes are described here; each person's
+        # own lines are the bar examples in their voice card.
         presence_rule = (
             "PUT YOURSELF IN THE POST, and this one is checked in code. A banger "
             f"is {who} reacting to something, not an encyclopedia entry about it. "
-            "It is rejected unless it carries at least one of the four shapes they "
-            "actually use: first person (\"my LIC agent looks suspicious to me\"), "
-            "the moment they met it (\"Just watched\", \"Just read\", \"After three "
-            "episodes of\"), a question to the reader (\"Why is everyone acting so "
-            "dumb?\"), or a reaction in the margin (\"honestly\", \"smh\", \"unfair\", "
-            "\"I love it\"). A true, clever observation with nobody in it is exactly "
-            "the draft this gate exists to stop.\n\n"
+            "It is rejected unless it carries at least one of four shapes: first "
+            "person (I, my, me), the moment they met the thing (what they read, "
+            "watched, sat through, or found in their inbox), a question they are "
+            "actually putting to the reader, or a reaction in the margin. Take the "
+            "wording from THEIR bar examples in the voice card, never from another "
+            "person's habits. A true, clever observation with nobody in it is "
+            "exactly the draft this gate exists to stop.\n\n"
             + ("AND SAY HOW IT LANDED, also checked in code. Being in the post is not "
-            "the same as feeling something in it: \"Just paid $7 for a Crumbl "
-            "cookie that will be gone next week\" is a receipt. Before you write, "
-            "pick the one feeling they actually had about this: amused, annoyed, "
+            "the same as feeling something in it: \"Just paid $7 for a cookie "
+            "that will be gone next week\" is a receipt. Before you write, pick "
+            "the one feeling they actually had about this (amused, annoyed, "
             "suspicious, embarrassed, impressed, jealous, confused, disappointed, "
-            "delighted, nervous, guilty, sold. Then let it show the way they do: in "
-            "a word (\"Unfair.\"), a reaction (\"I love it.\", \"smh\"), an "
-            "admission (\"my LIC agent looks suspicious to me now\"), or a "
-            "reaction emoji. A clever comparison is not a feeling; it is what the "
-            "machine writes instead of one.\n\n" if require_feeling else "")
-            + "Vary the shape. Opening every "
-            "post with \"Just watched\" or closing every one with the same emoji "
-            "turns the fix into a new tic: they sign off with an emoji in about "
-            "one post in four, on four different ones, and a sign-off that "
-            "repeats is refused here."
+            "delighted, nervous, guilty, sold) and let it show the way the voice "
+            "card shows they do: a word, a reaction, an admission, or, if the card "
+            "allows it, a reaction emoji. A clever comparison is not a feeling; it "
+            "is what the machine writes instead of one.\n\n" if require_feeling else "")
+            + "Vary the shape. Opening every post the same way or closing every "
+            "one with the same emoji or the same hedge turns the fix into a new "
+            "tic, and a repeated sign-off or hedge is refused here."
         )
     else:
         presence_rule = (
@@ -144,11 +147,11 @@ DO NOT REUSE THEIR LINES. The voice card quotes their real sentences as the bar.
 CLEAN is the axis drafts fail on, and it is graded against this exact list. Avoid every one:
 {clean_rules}
 {clean_note}
-{dash_rule}Open on a fact, a name, a scene, or the moment you met the thing ("Just watched Toy Story 5 today", "After three episodes of The Pyramid Scheme"). A question is allowed when it is a real one you are putting to the reader; never as throat-clearing.
+{dash_rule}Open on a fact, a name, a scene, or the moment you met the thing. A question is allowed when it is a real one you are putting to the reader; never as throat-clearing.
 
 {presence_rule}
 
-They are not a stylist. Their real posts carry contractions, an aside, a shrug, "honestly", "smh", a reaction at the end. Prose with no fingerprints on it is the tell you are trying to avoid, not the goal.
+Real posts carry fingerprints: contractions, an aside, a hedge, a reaction. Use THEIR fingerprints, as the voice card describes them; prose with none is the tell you are trying to avoid, not the goal.
 
 IT MUST STAND ALONE. A stranger reads it cold, with nothing above it. Name who and what in the sentence that needs them: "my dog" rather than "she", the product rather than "it". A post that only makes sense to somebody who was in the room is rejected.
 

@@ -148,10 +148,12 @@ STOP_SLOP_UNIVERSAL = [
 ]
 STOP_SLOP_LONGFORM_ONLY = [
     "pull-quote bait, a line engineered to sound quotable reads as AI",
+    # Was "('Unfair.', 'I love it.', 'smh.')... 65% of the author's own posts":
+    # Adi's lines and Adi's number, sent to every tenant's critic.
     "dramatic fragmentation for rhythm: runs of noun fragments like 'Speed. Scale. "
-    "Trust.' or 'Not a bakery. A drop.' A single short reaction that carries a "
-    "feeling ('Unfair.', 'I love it.', 'smh.', 'Not surprising.') is NOT this tell: "
-    "65% of the author's own posts contain one, so do not dock it",
+    "Trust.' or 'Not a bakery. A drop.' A single short reaction or verdict in the "
+    "author's own manner (see their bar examples) is NOT this tell, so do not "
+    "dock it",
 ]
 
 
