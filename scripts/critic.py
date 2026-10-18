@@ -849,6 +849,19 @@ def thinks_in_public(draft):
     )
 
 
+FEELING_LOOKBACK = 2
+
+
+def recent_feeling(generated_path, lookback=FEELING_LOOKBACK):
+    """True if any of the last few shipped drafts carried a feeling.
+
+    Fewer shipped drafts than the window means no quota yet."""
+    finals = shipped_finals(generated_path)
+    if len(finals) < lookback:
+        return True
+    return any(has_feeling(t) for t in finals[-lookback:])
+
+
 def recent_public_thinking(generated_path, lookback=PUBLIC_LOOKBACK):
     """True if any of the last few shipped drafts showed its working.
 
@@ -874,7 +887,8 @@ def slop_hits(draft):
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
-           must_think=False, banned_stance=(), require_feeling=True):
+           must_think=False, banned_stance=(), require_feeling=True,
+           must_feel=False):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -925,6 +939,11 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "nobody in the post: a banger is him reacting to something, so it "
             "needs I/my, the moment he met it, a question, or a reaction"
         )
+    if must_feel and not has_feeling(draft):
+        return "FAIL", (
+            "the last two posts carried no feeling and neither does this one: "
+            "say how it landed, the way their voice card shows they do"
+        )
     if require_feeling and register in FEELING_REGISTERS and not has_feeling(draft):
         return "FAIL", (
             "no feeling: he is in the post but never says how it landed. Name "
@@ -958,7 +977,8 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
 def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
           effort=None, generated_path=None, max_chars=None,
-          banned_motifs=None, palette="", require_feeling=True):
+          banned_motifs=None, palette="", require_feeling=True,
+          feeling_quota=False):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -1004,6 +1024,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         must_think=not recent_public_thinking(log_path_for_rules),
         banned_stance=recent_stance_words(log_path_for_rules),
         require_feeling=require_feeling,
+        must_feel=feeling_quota and not recent_feeling(log_path_for_rules),
     )
     result = {
         "verdict": verdict,
@@ -1406,6 +1427,20 @@ def selftest():
     assert slop_hits("Every DTC brand hides its spec sheet behind a founder "
                      "letter and calls that transparency.")
     assert not slop_hits("Most teams are just scratching the surface.")
+
+    # The feeling quota: deadpan is allowed, three deadpans in a row is not.
+    assert decide(clean, "LOIs do not count as customers. I keep saying it.",
+                  register="analytical", must_feel=True)[0] == "FAIL"
+    assert decide(clean, "LOIs do not count as customers. I love that rule.",
+                  register="analytical", must_feel=True)[0] == "PASS"
+    import json as _jq, tempfile as _tfq
+    _q = pathlib.Path(_tfq.mkdtemp()) / "q.jsonl"
+    _q.write_text("\n".join(_jq.dumps({"verdict": "PASS", "final": x}) for x in (
+        "Signed contracts count.", "Send the forwardable blurb.")))
+    assert recent_feeling(_q) is False
+    _q.write_text(_q.read_text() + "\n" + _jq.dumps(
+        {"verdict": "PASS", "final": "I love a wild idea."}))
+    assert recent_feeling(_q) is True
 
     # The feeling rule is per person: a deadpan verdict is Khoa's voice.
     assert decide(clean, "LOIs do not count as customers. I keep saying it.",

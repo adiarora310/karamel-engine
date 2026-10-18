@@ -334,6 +334,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             max_chars=tenant.max_chars,
             samples_path=tenant.samples_path,
             require_feeling=tenant.require_feeling,
+            feeling_quota=tenant.feeling_quota,
             log=True,
         )
         if r["verdict"] != "PASS":

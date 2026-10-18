@@ -48,7 +48,7 @@ REGISTER_NOTE = {
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
                        owe_thinking=False, banned_stance=(), palette="",
-                       require_feeling=True):
+                       require_feeling=True, owe_feeling=False):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -131,6 +131,13 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
         )
     if palette:
         cooldown += f"\n{palette}\n"
+    if owe_feeling:
+        cooldown += (
+            "\nTHE LAST TWO POSTS CARRIED NO FEELING, so this one must, and that "
+            "is checked in code. Deadpan is part of this voice; three in a row "
+            "is not. Say how it landed the way their voice card shows they do "
+            "(their own words for liking, disliking, being surprised or "
+            "unconvinced), in their palette, not a stranger's.\n")
     fb = (f"\nThe previous draft was rejected. The single fix to make: {feedback}\n"
           "Rewrite to fix exactly that. Keep what already worked.\n" if feedback else "")
     return f"""You are drafting an original post in {who}'s voice. Their voice card is in your system prompt; obey every rule in it, especially the anti-patterns and the hard do-not lines.
@@ -166,7 +173,7 @@ Output ONLY the post text, nothing else."""
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
                banned_motifs=(), owe_thinking=False, banned_stance=(),
-               palette="", require_feeling=True):
+               palette="", require_feeling=True, owe_feeling=False):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -177,7 +184,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            banned_motifs=banned_motifs,
                            owe_thinking=owe_thinking,
                            banned_stance=banned_stance, palette=palette,
-                           require_feeling=require_feeling),
+                           require_feeling=require_feeling,
+                           owe_feeling=owe_feeling),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -187,7 +195,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
 def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
-                   max_chars=None, samples_path=None, require_feeling=True):
+                   max_chars=None, samples_path=None, require_feeling=True,
+                   feeling_quota=False):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -215,6 +224,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     except Exception:
         pal = ""
     stale_hedges = critic.recent_stance_words(log_for_rules)
+    owe_feeling = feeling_quota and not critic.recent_feeling(log_for_rules)
 
     def regenerate(feedback):
         if feedback is None and seed is not None:
@@ -224,13 +234,15 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           max_chars=ceiling, banned_motifs=cooling,
                           owe_thinking=not critic.recent_public_thinking(log_for_rules),
                           banned_stance=stale_hedges, palette=pal,
-                          require_feeling=require_feeling)
+                          require_feeling=require_feeling,
+                          owe_feeling=owe_feeling)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
                          generated_path=log_for_rules, max_chars=ceiling,
                          banned_motifs=cooling, palette=pal,
                          require_feeling=require_feeling,
+                         feeling_quota=feeling_quota,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -356,7 +368,7 @@ def selftest():
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
                 banned_motifs=(), owe_thinking=False, banned_stance=(),
-                palette="", require_feeling=True):
+                palette="", require_feeling=True, owe_feeling=False):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -366,7 +378,8 @@ def selftest():
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
                    tenant=None, max_chars=None, generated_path=None,
-                   banned_motifs=None, palette="", require_feeling=True):
+                   banned_motifs=None, palette="", require_feeling=True,
+                   feeling_quota=False):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -406,6 +419,8 @@ def selftest():
     assert "SAY HOW IT LANDED" in b and "SAY HOW IT LANDED" not in a
     deadpan = build_draft_prompt("v", "t", "banger", require_feeling=False)
     assert "PUT YOURSELF IN THE POST" in deadpan and "SAY HOW IT LANDED" not in deadpan
+    owed = build_draft_prompt("v", "t", "analytical", owe_feeling=True)
+    assert "CARRIED NO FEELING" in owed and "CARRIED NO FEELING" not in a
     assert "PUT YOURSELF IN THE POST" not in a
     assert "allowed to be impersonal" in a
     assert "never as throat-clearing" in b
@@ -488,6 +503,7 @@ def main():
             max_chars=tenant.max_chars if tenant else None,
             samples_path=tenant.samples_path if tenant else None,
             require_feeling=tenant.require_feeling if tenant else True,
+            feeling_quota=tenant.feeling_quota if tenant else False,
             allow_em_dash=(tenant.allow_em_dash if tenant
                            else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:

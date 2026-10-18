@@ -123,6 +123,11 @@ DEFAULTS = {
     # each time, so an install that never sets this behaves exactly as before.
     # "hourly" drafts `drafts_per_run` (default 1) every hour inside their
     # posting window.
+    # A softer feeling rule for a voice that is warm overall but deadpan line
+    # by line: no per-draft veto, but after two shipped drafts with no feeling
+    # the next one must carry one. Khoa: 66% of his own writing carries a
+    # feeling, his drafts with the hard rule off came out at 37%.
+    "feeling_quota": False,
     "cadence": "twice_daily",
     "drafts_per_run": None,
     "timezone": "America/New_York",
@@ -173,6 +178,7 @@ class Tenant:
         self.allow_em_dash = data.get("allow_em_dash", DEFAULTS["allow_em_dash"])
         self.require_feeling = bool(data.get("require_feeling",
                                              DEFAULTS["require_feeling"]))
+        self.feeling_quota = bool(data.get("feeling_quota", DEFAULTS["feeling_quota"]))
         cadence = (data.get("cadence") or DEFAULTS["cadence"]).lower()
         if cadence not in CADENCES:
             raise ValueError(f"tenant {data.get('id')!r} has cadence {cadence!r}; "
@@ -392,6 +398,7 @@ class Tenant:
             "reply_mining": self.reply_mining, "enabled": self.enabled,
             "require_feeling": self.require_feeling,
             "cadence": self.cadence, "drafts_per_run": self.drafts_per_run,
+            "feeling_quota": self.feeling_quota,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,
