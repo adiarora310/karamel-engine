@@ -24,6 +24,7 @@ nor the new one.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 import sys
 
 from shared import PROJECT, agent_labels, owner_id
@@ -102,11 +103,36 @@ def refresh_agents(owner):
     label is a no-op, which is why "I reloaded it" and "it is running the new
     code" have been two different things here before."""
     notes = []
+    agents_dir = Path.home() / "Library" / "LaunchAgents"
+    before = {p.name: p.read_bytes() for p in agents_dir.glob("com.karamel.*.plist")}
     rc = subprocess.run(
         [sys.executable, str(PROJECT / "deploy" / "install.py"),
          "--owner", owner], capture_output=True, text=True, timeout=TIMEOUT)
     notes.append("plists refreshed" if rc.returncode == 0
                  else f"plist refresh failed: {rc.stderr.strip()[:120]}")
+    # **A rewritten plist is not a loaded one.** launchd keeps the schedule it
+    # read at bootstrap, so moving the heartbeat from 09:00/15:00 to hourly
+    # wrote 24 calendar entries to disk while the loaded job kept firing
+    # twice a day, on every install, with nothing to show it. A job whose
+    # plist changed is booted out and back in. The updater is skipped: booting
+    # it out would kill this very process mid-update; its own plist change
+    # takes effect the next time it is loaded.
+    for path in sorted(agents_dir.glob("com.karamel.*.plist")):
+        label = path.stem
+        if label.endswith(".updater") or before.get(path.name) == path.read_bytes():
+            continue
+        if path.name not in before:
+            continue  # newly written, never loaded: loading is ./karamel start's call
+        loaded = subprocess.run(["launchctl", "print", f"gui/{_uid()}/{label}"],
+                                capture_output=True, text=True, timeout=TIMEOUT)
+        if loaded.returncode != 0:
+            continue  # on disk but deliberately not running
+        subprocess.run(["launchctl", "bootout", f"gui/{_uid()}", str(path)],
+                       capture_output=True, text=True, timeout=TIMEOUT)
+        r = subprocess.run(["launchctl", "bootstrap", f"gui/{_uid()}", str(path)],
+                           capture_output=True, text=True, timeout=TIMEOUT)
+        notes.append(f"{label} reloaded with its new schedule" if r.returncode == 0
+                     else f"{label} reload failed: {(r.stderr or '').strip()[:80]}")
     for short in LONG_RUNNING:
         done = False
         misses = []
