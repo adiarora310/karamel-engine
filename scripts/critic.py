@@ -332,6 +332,10 @@ MOTIF_STOPWORDS = frozenset({
     "Its", "Our", "We", "Was", "Were", "Are", "Is", "Be", "Been", "Had", "Has",
     "Have", "Will", "Would", "Can", "Could", "Should", "A", "An", "In", "On",
     "At", "By", "To", "Of", "So", "No", "Yes", "After", "Before", "Once",
+    # The blank marker is not a reference, and web2 lists "pay" and "hear"
+    # but not "paid" or "heard": "Paid $7 for a Crumbl cookie" banked "paid"
+    # and vetoed "Paid an airline to choose 14C" in the next run.
+    "VERIFY", "Verify", "Paid", "Heard",
 })
 
 MOTIF_RE = re.compile(r"\b([A-Z][a-zA-Z]{2,})\b")
@@ -538,45 +542,71 @@ def motifs(text):
     return out
 
 
-def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
-    """Everything the last few shipped drafts already used.
+def shipped_finals(generated_path):
+    """The texts that actually shipped, oldest first.
 
-    Reads the tenant's own generated log rather than taking an argument from the
-    caller, because the caller that forgets to pass it gets no cooldown and
-    nothing says so. Missing or unreadable file means an empty set: a cooldown
-    that cannot be computed must not block drafting."""
+    **Every rolling window reads this, and only PASS rows count.** The log
+    also holds rejected attempts with their last draft in `final`, and the
+    windows were reading those too: a Crumbl topic that failed once put
+    "crumbl" on cooldown, so its own retry was vetoed for "reusing" a name
+    that never reached the inbox, and the maker started writing "the
+    pink-box cookie chain" to dodge it and was failed for vagueness. A
+    cooldown is about what the reader has seen. Missing or unreadable log
+    means an empty list: a budget that cannot be computed must never block."""
     import json as _json
 
     path = pathlib.Path(generated_path) if generated_path else None
     if not path or not path.exists():
-        return frozenset()
-    rows = []
+        return []
+    out = []
     try:
         for line in path.read_text().splitlines():
             line = line.strip()
             if not line:
                 continue
             try:
-                rows.append(_json.loads(line))
+                row = _json.loads(line)
             except ValueError:
                 continue
+            if row.get("verdict") == "PASS" and row.get("final"):
+                out.append(row["final"])
     except OSError:
-        return frozenset()
-    finals = [r for r in rows if r.get("final")]
+        return []
+    return out
+
+
+def topic_exempt(cooling, topic):
+    """The cooldown minus whatever the topic itself names.
+
+    The budget exists to stop the maker reaching for the same reference
+    unprompted, which is the Rams reflex. A topic about Crumbl that is
+    refused the word "Crumbl" is not that: it is unwinnable, and the maker
+    writes "the pink-box cookie chain" instead and fails for vagueness. The
+    signatures stay locked even when a topic names them, because those are
+    the reflex the budget was built for."""
+    return frozenset(set(cooling) - (motifs(topic or "") - SIGNATURE_MOTIFS))
+
+
+def recent_motifs(generated_path, lookback=MOTIF_LOOKBACK):
+    """Every proper noun the last few shipped drafts used.
+
+    Reads the tenant's own log rather than taking an argument from the
+    caller, because the caller that forgets to pass it gets no cooldown and
+    nothing says so."""
+    finals = shipped_finals(generated_path)
     used = set()
-    for row in finals[-lookback:]:
-        used |= motifs(row.get("final"))
+    for text in finals[-lookback:]:
+        used |= motifs(text)
     # **The signatures share one budget.** Tracking them separately let a batch
     # of five drafts spend Rams on the first and Ring on the third, which is
     # precisely the complaint ("each one has either Ring or Rams"). Any one of
     # them inside the window locks all of them, so the feed goes twenty drafts
     # between visits to that corner of the persona rather than twenty per name.
-    for row in finals[-SIGNATURE_LOOKBACK:]:
-        if motifs(row.get("final")) & SIGNATURE_MOTIFS:
+    for text in finals[-SIGNATURE_LOOKBACK:]:
+        if motifs(text) & SIGNATURE_MOTIFS:
             used |= SIGNATURE_MOTIFS
             break
     return frozenset(used)
-
 
 EMOJI = re.compile("[\U0001F300-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]")
 EMOJI_LOOKBACK = 3
@@ -598,26 +628,7 @@ def closing_emoji(draft):
 
 def recent_closing_emoji(generated_path, lookback=EMOJI_LOOKBACK):
     """True if any of the last few shipped drafts already signed off with one."""
-    import json as _json
-
-    path = pathlib.Path(generated_path) if generated_path else None
-    if not path or not path.exists():
-        return False
-    rows = []
-    try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(_json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        return False
-    finals = [r for r in rows if r.get("final")]
-    return any(closing_emoji(r.get("final")) for r in finals[-lookback:])
-
+    return any(closing_emoji(t) for t in shipped_finals(generated_path)[-lookback:])
 
 # --- thinking in public ------------------------------------------------
 #
@@ -790,36 +801,17 @@ def stance_words(draft):
 
 
 def recent_stance_words(generated_path, lookback=2):
-    """The markers the last couple of drafts already leaned on.
+    """The hedges and feeling words the last couple of shipped drafts used.
 
     The maker reaches for one word and keeps it: the first batch after the
     emoji was documented ended 3 of 3 on the same 🤌🏻, and the first batch
     after hedging was allowed opened its closer with "Honestly" in 2 of 3.
     Hobart and Tavel vary theirs across "I wonder", "probably", "I conclude",
     "maybe I've misunderstood", so the budget is per word, not per draft."""
-    import json as _json
-
-    path = pathlib.Path(generated_path) if generated_path else None
-    if not path or not path.exists():
-        return frozenset()
-    rows = []
-    try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(_json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        return frozenset()
-    finals = [r.get("final") for r in rows if r.get("final")]
     used = set()
-    for f in finals[-lookback:]:
-        used |= stance_words(f)
+    for t in shipped_finals(generated_path)[-lookback:]:
+        used |= stance_words(t)
     return frozenset(used)
-
 
 def thinks_in_public(draft):
     """Does the post show the thinking, or only the conclusion?
@@ -835,29 +827,14 @@ def thinks_in_public(draft):
 
 
 def recent_public_thinking(generated_path, lookback=PUBLIC_LOOKBACK):
-    """True if any of the last few shipped drafts showed its working."""
-    import json as _json
+    """True if any of the last few shipped drafts showed its working.
 
-    path = pathlib.Path(generated_path) if generated_path else None
-    if not path or not path.exists():
-        return True  # no log, no quota: never block drafting on a missing file
-    rows = []
-    try:
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(_json.loads(line))
-            except ValueError:
-                continue
-    except OSError:
-        return True
-    finals = [r.get("final") for r in rows if r.get("final")]
+    Fewer shipped drafts than the window means no quota yet: a brand new
+    tenant must not have its first post forced into a shape."""
+    finals = shipped_finals(generated_path)
     if len(finals) < lookback:
         return True
-    return any(thinks_in_public(f) for f in finals[-lookback:])
-
+    return any(thinks_in_public(t) for t in finals[-lookback:])
 
 def slop_hits(draft):
     """The refused constructions present in a draft, as (quote, label) pairs.
@@ -957,7 +934,8 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
 
 def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
-          effort=None, generated_path=None, max_chars=None):
+          effort=None, generated_path=None, max_chars=None,
+          banned_motifs=None):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -994,7 +972,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
     verdict, override = decide(
         parsed["scores"], draft, allow_em_dash=allow_em_dash,
         max_chars=ceiling,
-        banned_motifs=recent_motifs(log_path_for_rules),
+        banned_motifs=(banned_motifs if banned_motifs is not None
+                       else recent_motifs(log_path_for_rules)),
         standalone=parsed.get("standalone", True),
         register=register,
         emoji_cooling=recent_closing_emoji(log_path_for_rules),
@@ -1430,6 +1409,23 @@ def selftest():
     assert slop_hits("Just paid $7 for a Crumbl cookie. That's not a bakery, "
                      "it's Supreme's drop model with frosting.")
     assert slop_hits("They aren't selling cookies, they're selling a line.")
+
+    # Only shipped drafts count toward any window.
+    import json as _j, tempfile as _tf
+    _log = pathlib.Path(_tf.mkdtemp()) / "g.jsonl"
+    _log.write_text("\n".join(_j.dumps(r) for r in (
+        {"verdict": "PASS", "final": "Paid $7 for a Crumbl cookie. Unfair."},
+        {"verdict": "FAIL", "final": "Glossier is in Sephora now, honestly."},
+    )))
+    assert shipped_finals(_log) == ["Paid $7 for a Crumbl cookie. Unfair."]
+    assert "glossier" not in recent_motifs(_log)
+    assert "paid" not in recent_motifs(_log) and "crumbl" in recent_motifs(_log)
+    assert "honestly" not in recent_stance_words(_log)
+    assert "verify" not in motifs("Crumbl swaps [VERIFY: how many] flavors.")
+    # A topic may name its own subject; it may not unlock a signature.
+    assert "crumbl" not in topic_exempt({"crumbl", "nike"}, "Crumbl rotates its menu")
+    assert "nike" in topic_exempt({"crumbl", "nike"}, "Crumbl rotates its menu")
+    assert "rams" in topic_exempt({"rams"}, "What Rams would make of Crumbl")
 
     # A hedge that repeats is a tic: same budget as the sign-off emoji.
     assert stance_words("Honestly I respect the funnel.") == {"honestly", "respect"}

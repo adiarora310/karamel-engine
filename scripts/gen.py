@@ -195,7 +195,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     # for a caller that passes the object.
     log_for_rules = generated_path or getattr(tenant, "generated_path", None)
     ceiling = max_chars if max_chars is not None else getattr(tenant, "max_chars", None)
-    cooling = critic.recent_motifs(log_for_rules)
+    cooling = critic.topic_exempt(critic.recent_motifs(log_for_rules), topic)
     stale_hedges = critic.recent_stance_words(log_for_rules)
 
     def regenerate(feedback):
@@ -210,6 +210,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
                          generated_path=log_for_rules, max_chars=ceiling,
+                         banned_motifs=cooling,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -343,7 +344,8 @@ def selftest():
 
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
-                   tenant=None, max_chars=None, generated_path=None):
+                   tenant=None, max_chars=None, generated_path=None,
+                   banned_motifs=None):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
