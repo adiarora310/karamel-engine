@@ -47,7 +47,8 @@ REGISTER_NOTE = {
 
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
-                       owe_thinking=False, banned_stance=(), palette=""):
+                       owe_thinking=False, banned_stance=(), palette="",
+                       require_feeling=True):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -85,7 +86,7 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "dumb?\"), or a reaction in the margin (\"honestly\", \"smh\", \"unfair\", "
             "\"I love it\"). A true, clever observation with nobody in it is exactly "
             "the draft this gate exists to stop.\n\n"
-            "AND SAY HOW IT LANDED, also checked in code. Being in the post is not "
+            + ("AND SAY HOW IT LANDED, also checked in code. Being in the post is not "
             "the same as feeling something in it: \"Just paid $7 for a Crumbl "
             "cookie that will be gone next week\" is a receipt. Before you write, "
             "pick the one feeling they actually had about this: amused, annoyed, "
@@ -94,7 +95,8 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "a word (\"Unfair.\"), a reaction (\"I love it.\", \"smh\"), an "
             "admission (\"my LIC agent looks suspicious to me now\"), or a "
             "reaction emoji. A clever comparison is not a feeling; it is what the "
-            "machine writes instead of one.\n\nVary the shape. Opening every "
+            "machine writes instead of one.\n\n" if require_feeling else "")
+            + "Vary the shape. Opening every "
             "post with \"Just watched\" or closing every one with the same emoji "
             "turns the fix into a new tic: they sign off with an emoji in about "
             "one post in four, on four different ones, and a sign-off that "
@@ -161,7 +163,7 @@ Output ONLY the post text, nothing else."""
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
                banned_motifs=(), owe_thinking=False, banned_stance=(),
-               palette=""):
+               palette="", require_feeling=True):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -171,7 +173,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            allow_em_dash=allow_em_dash, max_chars=max_chars,
                            banned_motifs=banned_motifs,
                            owe_thinking=owe_thinking,
-                           banned_stance=banned_stance, palette=palette),
+                           banned_stance=banned_stance, palette=palette,
+                           require_feeling=require_feeling),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -181,7 +184,7 @@ def draft_post(voice, topic, register, feedback=None, author=None,
 def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
-                   max_chars=None, samples_path=None):
+                   max_chars=None, samples_path=None, require_feeling=True):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -217,12 +220,14 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           allow_em_dash=allow_em_dash, tenant=tenant,
                           max_chars=ceiling, banned_motifs=cooling,
                           owe_thinking=not critic.recent_public_thinking(log_for_rules),
-                          banned_stance=stale_hedges, palette=pal)
+                          banned_stance=stale_hedges, palette=pal,
+                          require_feeling=require_feeling)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
                          generated_path=log_for_rules, max_chars=ceiling,
                          banned_motifs=cooling, palette=pal,
+                         require_feeling=require_feeling,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -348,7 +353,7 @@ def selftest():
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
                 banned_motifs=(), owe_thinking=False, banned_stance=(),
-                palette=""):
+                palette="", require_feeling=True):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -358,7 +363,7 @@ def selftest():
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
                    tenant=None, max_chars=None, generated_path=None,
-                   banned_motifs=None, palette=""):
+                   banned_motifs=None, palette="", require_feeling=True):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -396,6 +401,8 @@ def selftest():
     a = build_draft_prompt("v", "t", "analytical")
     assert "PUT YOURSELF IN THE POST" in b and "checked in code" in b
     assert "SAY HOW IT LANDED" in b and "SAY HOW IT LANDED" not in a
+    deadpan = build_draft_prompt("v", "t", "banger", require_feeling=False)
+    assert "PUT YOURSELF IN THE POST" in deadpan and "SAY HOW IT LANDED" not in deadpan
     assert "PUT YOURSELF IN THE POST" not in a
     assert "allowed to be impersonal" in a
     assert "never as throat-clearing" in b
@@ -476,6 +483,8 @@ def main():
             generated_path=tenant.generated_path if tenant else None,
             critiques_path=tenant.critiques_path if tenant else None,
             max_chars=tenant.max_chars if tenant else None,
+            samples_path=tenant.samples_path if tenant else None,
+            require_feeling=tenant.require_feeling if tenant else True,
             allow_em_dash=(tenant.allow_em_dash if tenant
                            else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:

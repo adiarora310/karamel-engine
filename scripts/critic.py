@@ -872,7 +872,7 @@ def slop_hits(draft):
 
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
-           must_think=False, banned_stance=()):
+           must_think=False, banned_stance=(), require_feeling=True):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -923,7 +923,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "nobody in the post: a banger is him reacting to something, so it "
             "needs I/my, the moment he met it, a question, or a reaction"
         )
-    if register in FEELING_REGISTERS and not has_feeling(draft):
+    if require_feeling and register in FEELING_REGISTERS and not has_feeling(draft):
         return "FAIL", (
             "no feeling: he is in the post but never says how it landed. Name "
             "it (annoyed, suspicious, I love it, unfair, smh) or show it"
@@ -956,7 +956,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
 def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
           effort=None, generated_path=None, max_chars=None,
-          banned_motifs=None, palette=""):
+          banned_motifs=None, palette="", require_feeling=True):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -1001,6 +1001,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         emoji_cooling=recent_closing_emoji(log_path_for_rules),
         must_think=not recent_public_thinking(log_path_for_rules),
         banned_stance=recent_stance_words(log_path_for_rules),
+        require_feeling=require_feeling,
     )
     result = {
         "verdict": verdict,
@@ -1403,6 +1404,12 @@ def selftest():
     assert slop_hits("Every DTC brand hides its spec sheet behind a founder "
                      "letter and calls that transparency.")
     assert not slop_hits("Most teams are just scratching the surface.")
+
+    # The feeling rule is per person: a deadpan verdict is Khoa's voice.
+    assert decide(clean, "LOIs do not count as customers. I keep saying it.",
+                  register="banger", require_feeling=False)[0] == "PASS"
+    assert decide(clean, "LOIs do not count as customers. I keep saying it.",
+                  register="banger", require_feeling=True)[0] == "FAIL"
 
     # Presence is not feeling. The Crumbl receipt has one and not the other.
     receipt = ("Just paid $7 for a Crumbl cookie that will be gone from the "

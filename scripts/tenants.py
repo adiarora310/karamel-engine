@@ -109,6 +109,11 @@ def default_author():
     return "the author"
 
 DEFAULTS = {
+    # Whether a banger must name or show a feeling (critic.has_feeling).
+    # Measured per person, never assumed: 76% of Adi's post-length writing
+    # carries one, about 1 in 10 of Khoa's verdict lines does ("LOIs do not
+    # count as customers."). Off unless their own writing says otherwise.
+    "require_feeling": False,
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -155,6 +160,8 @@ class Tenant:
         )
         self.reply_mining = data.get("reply_mining", DEFAULTS["reply_mining"])
         self.allow_em_dash = data.get("allow_em_dash", DEFAULTS["allow_em_dash"])
+        self.require_feeling = bool(data.get("require_feeling",
+                                             DEFAULTS["require_feeling"]))
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -345,6 +352,7 @@ class Tenant:
             "channel": self.channel, "timezone": self.timezone,
             "originals_per_day": self.originals_per_day,
             "reply_mining": self.reply_mining, "enabled": self.enabled,
+            "require_feeling": self.require_feeling,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,
