@@ -689,19 +689,87 @@ FEELING = re.compile(
 FEELING_REGISTERS = frozenset({"banger"})
 
 
+# VADER (MIT, Hutto & Gilbert 2014): 7,520 social-media words rated for
+# sentiment strength by human raters. Shipped in scripts/lexicons/ with its
+# licence. Only the token and its mean rating are used.
+VADER_PATH = pathlib.Path(__file__).resolve().parent / "lexicons" / "vader_lexicon.txt"
+VADER_STRONG = 1.5
+_VADER = None
+_VADER_READ = False
+VADER_TOKEN = re.compile(r"[a-z]+(?:'[a-z]+)?")
+# Words that put the author right before the rated word: "I'm obsessed",
+# "kinda heartbreaking", "honestly brutal", "looks suspicious".
+REACTION_CUES = frozenset({
+    "i", "i'm", "im", "i've", "my", "me", "it's", "that's", "so", "kinda",
+    "sorta", "honestly", "too", "really", "pretty", "lowkey", "am", "feel",
+    "felt", "looks", "just",
+})
+
+
+def _vader():
+    global _VADER, _VADER_READ
+    if not _VADER_READ:
+        _VADER_READ = True
+        lex = {}
+        try:
+            for line in VADER_PATH.read_text(encoding="utf-8").splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    try:
+                        lex[parts[0]] = float(parts[1])
+                    except ValueError:
+                        continue
+        except OSError:
+            lex = {}
+        _VADER = lex or None
+    return _VADER
+
+
+def reaction_words(draft):
+    """Strongly rated VADER words that sit where a reaction sits.
+
+    **Not a plain sentiment threshold, on purpose.** VADER scores what a post
+    is about: "Some bubbles build things... Bet on what survives" peaks at 2.3
+    on "survived", a post about fraud scores as emotional because of "fraud".
+    Used that way it separated his posts (53%) from our authorless bangers
+    (39%) barely at all. Counted only in reaction position, meaning a sentence
+    of four words or fewer ("Brutal.") or within three words after the author
+    ("I'm obsessed", "kinda heartbreaking"), it lifts recognition of his own
+    posts from 65% to 71% over the word list and still scores the old bangers
+    and the Crumbl receipt at zero."""
+    lex = _vader()
+    if not lex:
+        return set()
+    found = set()
+    text = (draft or "").lower().replace("\u2019", "'")
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        toks = VADER_TOKEN.findall(sentence)
+        short = 0 < len(toks) <= 4
+        for i, w in enumerate(toks):
+            if abs(lex.get(w, 0.0)) < VADER_STRONG:
+                continue
+            if short or any(c in REACTION_CUES for c in toks[max(0, i - 3):i]):
+                found.add(w)
+    return found
+
+
 def feelings(draft):
-    """The feeling words a draft uses, lowercased."""
-    return {m.group(0).lower() for m in FEELING.finditer(draft or "")}
+    """The feeling words a draft uses, lowercased: the word list's matches
+    plus any VADER word in reaction position."""
+    return ({m.group(0).lower() for m in FEELING.finditer(draft or "")}
+            | reaction_words(draft))
 
 
 def has_feeling(draft):
     """Does the post say how the author felt, not only what happened to them?
 
     A named feeling ("suspicious", "I love it", "unfair"), a reaction in slang
-    ("smh"), an exclamation, or a reaction emoji. "Just paid $7" is presence;
-    "Just paid $7 and I'm annoyed at how happy it made me" is a feeling."""
+    ("smh"), an exclamation, a reaction emoji, or a strongly rated VADER word
+    in reaction position. "Just paid $7" is presence; "Just paid $7 and I'm
+    weirdly proud of it" is a feeling."""
     text = draft or ""
-    return bool(FEELING.search(text) or "!" in text or EMOJI.search(text))
+    return bool(FEELING.search(text) or "!" in text or EMOJI.search(text)
+                or reaction_words(text))
 
 
 STANCE_WORDS = (
@@ -1348,6 +1416,15 @@ def selftest():
                   register="banger")[0] == "PASS"
     assert decide(clean, "Just paid $7 for a Crumbl cookie. Unfair how good it was.",
                   register="banger", banned_stance={"unfair"})[0] == "FAIL"
+
+    # VADER widens the net only where a reaction sits, so a post about fraud
+    # is not "emotional" and a receipt still is not.
+    if _vader():
+        assert "heartbreaking" in reaction_words("Kinda heartbreaking how good it was.")
+        assert reaction_words("Brutal.") == {"brutal"}
+        assert not reaction_words("Lenders took the recovery after the fraud case.")
+        assert has_feeling("Paid $7 for a cookie and I'm weirdly proud of it.")
+        assert not has_feeling(receipt)
 
     # The Crumbl draft, which shipped because its subject was "That".
     assert slop_hits("Just paid $7 for a Crumbl cookie. That's not a bakery, "
