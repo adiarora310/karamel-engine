@@ -140,6 +140,44 @@ def _uid():
     return os.getuid()
 
 
+def ensure_emotion():
+    """Put the GoEmotions model into service, best effort, never fatal.
+
+    The packages come from pip into the user site (no sudo, no venv to keep
+    track of), and the 125 MB model from Hugging Face, verified against the
+    SHA-256 pinned in emotion.FILES. Either can fail on a machine with no
+    network or an old pip, and the engine then runs on the word list and VADER
+    exactly as before, so a failure here is a note in the output, not an exit
+    code. Runs on every update, including "already up to date", so a fetch
+    that failed once is retried the next night rather than waiting for a
+    commit."""
+    notes = []
+    try:
+        import emotion
+    except ImportError:
+        return ["emotion module missing from this copy"]
+    if not emotion.packages_present():
+        try:
+            r = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--user", "--quiet",
+                 "--disable-pip-version-check", *emotion.PACKAGES],
+                capture_output=True, text=True, timeout=900)
+            if r.returncode == 0:
+                notes.append("emotion model packages installed")
+            else:
+                last = (r.stderr.strip().splitlines() or ["unknown error"])[-1]
+                notes.append(f"emotion packages not installed ({last}); "
+                             "drafting continues on the word list")
+        except (OSError, subprocess.TimeoutExpired) as e:
+            notes.append(f"emotion packages not installed ({e})")
+    if not emotion.model_present():
+        if emotion.fetch(quiet=True):
+            notes.append("emotion model downloaded and verified")
+        else:
+            notes.append("emotion model not downloaded; will retry next update")
+    return notes
+
+
 def update(owner="adi", quiet=False, check_only=False):
     def out(msg):
         if not quiet:
@@ -159,6 +197,9 @@ def update(owner="adi", quiet=False, check_only=False):
 
     if behind == 0:
         out(f"Already up to date ({branch}).")
+        if not check_only:
+            for note in ensure_emotion():
+                out(f"  {note}")
         return 0
 
     out(f"{behind} new commit(s) on {branch}.")
@@ -199,6 +240,8 @@ def update(owner="adi", quiet=False, check_only=False):
 
     print("\nPutting it into service:" if not quiet else "", end="" if quiet else "\n")
     for note in refresh_agents(owner):
+        out(f"  {note}")
+    for note in ensure_emotion():
         out(f"  {note}")
     out(f"\nUpdated {old[:7]} -> {new[:7]}.")
     return 0

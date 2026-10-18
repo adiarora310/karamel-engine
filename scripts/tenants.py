@@ -267,6 +267,14 @@ class Tenant:
         return self.data_dir / "generated.jsonl"
 
     @property
+    def samples_path(self):
+        """Their own real writing, one {"text": ...} per line. Read for the
+        emotional palette; never quoted into a draft. Kept apart from the voice
+        card on purpose: the card also quotes counter-examples and bad drafts
+        it warns against, and a palette measured from those is contaminated."""
+        return self.data_dir / "samples.jsonl"
+
+    @property
     def critiques_path(self):
         return self.data_dir / "critiques.jsonl"
 

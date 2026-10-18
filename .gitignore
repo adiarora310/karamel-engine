@@ -20,5 +20,8 @@ data/voice_cards/*
 
 .karamel
 *.pyc
+
+# The GoEmotions model: 125 MB, fetched and hash-checked by scripts/emotion.py.
+models/
 __pycache__/
 .DS_Store

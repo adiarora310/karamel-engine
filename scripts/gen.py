@@ -47,7 +47,7 @@ REGISTER_NOTE = {
 
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
-                       owe_thinking=False, banned_stance=()):
+                       owe_thinking=False, banned_stance=(), palette=""):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -124,6 +124,8 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "tic. There are plenty: I wonder, my guess, probably, no idea yet, "
             "I can't tell, maybe I have this wrong.\n"
         )
+    if palette:
+        cooldown += f"\n{palette}\n"
     fb = (f"\nThe previous draft was rejected. The single fix to make: {feedback}\n"
           "Rewrite to fix exactly that. Keep what already worked.\n" if feedback else "")
     return f"""You are drafting an original post in {who}'s voice. Their voice card is in your system prompt; obey every rule in it, especially the anti-patterns and the hard do-not lines.
@@ -158,7 +160,8 @@ Output ONLY the post text, nothing else."""
 
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
-               banned_motifs=(), owe_thinking=False, banned_stance=()):
+               banned_motifs=(), owe_thinking=False, banned_stance=(),
+               palette=""):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -168,7 +171,7 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            allow_em_dash=allow_em_dash, max_chars=max_chars,
                            banned_motifs=banned_motifs,
                            owe_thinking=owe_thinking,
-                           banned_stance=banned_stance),
+                           banned_stance=banned_stance, palette=palette),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -178,7 +181,7 @@ def draft_post(voice, topic, register, feedback=None, author=None,
 def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
-                   max_chars=None):
+                   max_chars=None, samples_path=None):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -196,6 +199,15 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     log_for_rules = generated_path or getattr(tenant, "generated_path", None)
     ceiling = max_chars if max_chars is not None else getattr(tenant, "max_chars", None)
     cooling = critic.topic_exempt(critic.recent_motifs(log_for_rules), topic)
+    # Their emotional range, measured by the GoEmotions model from their own
+    # writing. Empty when there is no samples file or no model installed.
+    if samples_path is None and log_for_rules:
+        samples_path = Path(log_for_rules).parent / "samples.jsonl"
+    try:
+        import emotion
+        pal = emotion.palette_line(samples_path, author or "them")
+    except Exception:
+        pal = ""
     stale_hedges = critic.recent_stance_words(log_for_rules)
 
     def regenerate(feedback):
@@ -205,12 +217,12 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           allow_em_dash=allow_em_dash, tenant=tenant,
                           max_chars=ceiling, banned_motifs=cooling,
                           owe_thinking=not critic.recent_public_thinking(log_for_rules),
-                          banned_stance=stale_hedges)
+                          banned_stance=stale_hedges, palette=pal)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
                          generated_path=log_for_rules, max_chars=ceiling,
-                         banned_motifs=cooling,
+                         banned_motifs=cooling, palette=pal,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -335,7 +347,8 @@ def selftest():
 
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
-                banned_motifs=(), owe_thinking=False, banned_stance=()):
+                banned_motifs=(), owe_thinking=False, banned_stance=(),
+                palette=""):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -345,7 +358,7 @@ def selftest():
     def fake_grade(d, voice, context=None, register="auto", log=False,
                    author=None, critiques_path=None, allow_em_dash=False,
                    tenant=None, max_chars=None, generated_path=None,
-                   banned_motifs=None):
+                   banned_motifs=None, palette=""):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)

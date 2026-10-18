@@ -168,7 +168,8 @@ def clean_axis(register):
     return rules, note
 
 
-def build_critique_prompt(voice, draft, context=None, register="auto", author=None):
+def build_critique_prompt(voice, draft, context=None, register="auto", author=None,
+                          palette=""):
     """`author` is the name the grader is told it works for. It was the literal
     a single hardcoded name until the registry existed, which meant every tenant's
     drafts were graded against a stranger: the voice card would say one person
@@ -177,11 +178,15 @@ def build_critique_prompt(voice, draft, context=None, register="auto", author=No
     ctx = (f'It is a reply to this post:\n"""{context}"""'
            if context else "It is an original post (no reply context).")
     clean_rules, clean_note = clean_axis(register)
+    # The person's measured emotional range (emotion.palette_line). Guidance for
+    # VOICE, not a veto: seventeen posts is too few to refuse a draft on.
+    pal_note = (f"\n{palette} A draft whose feeling is outside that range "
+                "scores lower on VOICE." if palette else "")
     return f"""You are the strictest editor {who} has. Your only job is to catch drafts that do not sound like them, or that fall flat, before they ever reach them. You did not write this draft. Be skeptical. Default to FAIL if it is generic, flat, or could have been written by anyone.
 
 Their voice card is in your system prompt. Grade against it.
 {ctx}
-Register for this draft: {register}. {clean_note}
+Register for this draft: {register}. {clean_note}{pal_note}
 
 DRAFT TO GRADE:
 \"\"\"{draft}\"\"\"
@@ -779,8 +784,24 @@ def has_feeling(draft):
     in reaction position. "Just paid $7" is presence; "Just paid $7 and I'm
     weirdly proud of it" is a feeling."""
     text = draft or ""
-    return bool(FEELING.search(text) or "!" in text or EMOJI.search(text)
-                or reaction_words(text))
+    if (FEELING.search(text) or "!" in text or EMOJI.search(text)
+            or reaction_words(text)):
+        return True
+    # The GoEmotions model, when installed, reads feelings no list names
+    # ("I keep going back anyway"). Only an author-side reading counts: see
+    # emotion.SUBJECT_LABELS for why praise of the subject does not.
+    return bool(_emotion_rescue(text))
+
+
+def _emotion_rescue(text):
+    try:
+        import emotion
+    except ImportError:
+        return None
+    try:
+        return emotion.rescues(text)
+    except Exception:
+        return None
 
 
 STANCE_WORDS = (
@@ -935,7 +956,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
 def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
           effort=None, generated_path=None, max_chars=None,
-          banned_motifs=None):
+          banned_motifs=None, palette=""):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -946,7 +967,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
     log_path = critiques_path or CRITIQUES
     try:
         out = call_claude(
-            build_critique_prompt(voice, draft, context, register, author=author),
+            build_critique_prompt(voice, draft, context, register, author=author,
+                                  palette=palette),
             system=voice, label="critic", tenant=tenant, effort=effort,
         )
     except (RuntimeError, subprocess.TimeoutExpired) as e:
