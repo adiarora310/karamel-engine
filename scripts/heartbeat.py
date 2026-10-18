@@ -23,7 +23,9 @@ down into them would make every unit test need a tenant on disk.
 
 CLI:
   --tenant ID   whose voice, whose channel, whose files (default adi)
-  --all         run every enabled tenant in turn
+  --all         run every enabled tenant whose hour this is (see
+                tenants.Tenant.due); the agent fires --all every hour
+  --now         with --all, run every enabled tenant regardless of the hour
   --limit N     max drafts this run per tenant (default: the tenant's setting)
   --force       run even if paused
   --print       dry run: generate and show delivery, do not send or record
@@ -297,7 +299,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
     # A new tenant with an empty queue and no seeds draws a blank rather than
     # inheriting someone else's subjects.
     seeds = tenant.seed_topics or (LEGACY_SEED_TOPICS if tenant.is_legacy else [])
-    n = tenant.originals_per_day if limit is None else limit
+    n = tenant.per_run if limit is None else limit
     topics = next_topics(n, tenant.topic_queue_path, tenant.original_drafts_path,
                          seeds=seeds, generated=tenant.generated_path)
     if not topics:
@@ -653,10 +655,18 @@ def main():
         limit = int(limit_str)
 
     if "--all" in sys.argv:
-        ids = [t.id for t in tenants.list_tenants()]
-        if not ids:
+        everyone = tenants.list_tenants()
+        if not everyone:
             print("no enabled tenants registered", file=sys.stderr)
             return 1
+        # The agent fires every hour; each tenant's cadence decides whether
+        # this hour is theirs. --force or --now runs everyone regardless.
+        if "--force" in sys.argv or "--now" in sys.argv:
+            ids = [t.id for t in everyone]
+        else:
+            ids = [t.id for t in everyone if t.due()]
+            if not ids:
+                return 0
     else:
         ids = [_arg("--tenant", tenants.LEGACY_TENANT)]
 

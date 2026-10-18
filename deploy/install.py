@@ -40,7 +40,10 @@ AGENTS = HOME / "Library" / "LaunchAgents"
 # consults the tenant's effective reply-mining state, which is the AND of their
 # config and the allowlist module that is not distributed.
 AGENTS_SPEC = {
-    "heartbeat": ("heartbeat.py", ["--all"], [(9, 0), (15, 0)]),
+    # Every hour; each tenant's cadence decides whether the hour is theirs
+    # (tenants.Tenant.due). A tenant left on the default still drafts only at
+    # 09:00 and 15:00, so this widens the clock without changing any volume.
+    "heartbeat": ("heartbeat.py", ["--all"], [(h, 0) for h in range(24)]),
     "drafter": ("drafter.py", [], 1200),
     "notifier": ("notifier.py", [], 1200),
     "inbox": ("inbox.py", ["--once"], 300),

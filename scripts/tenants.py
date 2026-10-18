@@ -108,12 +108,23 @@ def default_author():
         pass
     return "the author"
 
+CADENCES = frozenset({"twice_daily", "hourly"})
+TWICE_DAILY_HOURS = (9, 15)
+
 DEFAULTS = {
     # Whether a banger must name or show a feeling (critic.has_feeling).
     # Measured per person, never assumed: 76% of Adi's post-length writing
     # carries one, about 1 in 10 of Khoa's verdict lines does ("LOIs do not
     # count as customers."). Off unless their own writing says otherwise.
     "require_feeling": False,
+    # How often the heartbeat drafts for them. The heartbeat agent fires every
+    # hour; each tenant decides whether this hour is theirs. "twice_daily" is
+    # the original 09:00 and 15:00 (machine-local), `originals_per_day` drafts
+    # each time, so an install that never sets this behaves exactly as before.
+    # "hourly" drafts `drafts_per_run` (default 1) every hour inside their
+    # posting window.
+    "cadence": "twice_daily",
+    "drafts_per_run": None,
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -162,6 +173,13 @@ class Tenant:
         self.allow_em_dash = data.get("allow_em_dash", DEFAULTS["allow_em_dash"])
         self.require_feeling = bool(data.get("require_feeling",
                                              DEFAULTS["require_feeling"]))
+        cadence = (data.get("cadence") or DEFAULTS["cadence"]).lower()
+        if cadence not in CADENCES:
+            raise ValueError(f"tenant {data.get('id')!r} has cadence {cadence!r}; "
+                             f"expected one of {sorted(CADENCES)}")
+        self.cadence = cadence
+        dpr = data.get("drafts_per_run")
+        self.drafts_per_run = int(dpr) if dpr not in (None, "") else None
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -243,6 +261,26 @@ class Tenant:
         self._raw = data
 
     # ---- paths -----------------------------------------------------------
+
+    @property
+    def per_run(self):
+        """Drafts per heartbeat run that is theirs."""
+        if self.drafts_per_run is not None:
+            return self.drafts_per_run
+        return 1 if self.cadence == "hourly" else self.originals_per_day
+
+    def due(self, local=None):
+        """Is this hour one of theirs?
+
+        twice_daily keeps the original machine-local 09:00 and 15:00 so other
+        installs do not change behaviour when the agent starts firing hourly.
+        hourly follows their posting window (karamel_common.in_posting_window,
+        Eastern time), so a tenant set to hourly is not emailed at 03:00."""
+        local = local or datetime.now()
+        if self.cadence == "hourly":
+            from karamel_common import in_posting_window
+            return in_posting_window(tenant=self)
+        return local.hour in TWICE_DAILY_HOURS
 
     @property
     def is_legacy(self):
@@ -353,6 +391,7 @@ class Tenant:
             "originals_per_day": self.originals_per_day,
             "reply_mining": self.reply_mining, "enabled": self.enabled,
             "require_feeling": self.require_feeling,
+            "cadence": self.cadence, "drafts_per_run": self.drafts_per_run,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,
@@ -649,6 +688,22 @@ def selftest():
     # Ports are per tenant: one Chrome holds one person's X session.
     assert Tenant({"id": "z"}).cdp_port == 9222
     assert Tenant({"id": "z", "cdp_port": 9223}).cdp_port == 9223
+
+    # Cadence: absent behaves as it always did; hourly is one draft an hour
+    # inside their window.
+    plain = Tenant({"id": "z", "originals_per_day": 3})
+    assert plain.cadence == "twice_daily" and plain.per_run == 3
+    assert plain.due(datetime(2026, 10, 19, 9, 0)) and plain.due(datetime(2026, 10, 19, 15, 2))
+    assert not plain.due(datetime(2026, 10, 19, 11, 0))
+    hourly = Tenant({"id": "z", "cadence": "hourly",
+                     "posting_window": {"start": 8, "end": 23}})
+    assert hourly.per_run == 1
+    assert Tenant({"id": "z", "cadence": "hourly", "drafts_per_run": 2}).per_run == 2
+    try:
+        Tenant({"id": "z", "cadence": "every-minute"})
+        raise AssertionError("an unknown cadence must fail at load")
+    except ValueError:
+        pass
 
     # always_on is off unless a record asks for it, so it cannot arrive by
     # default on somebody else's install.
