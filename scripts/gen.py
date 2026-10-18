@@ -84,7 +84,17 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "episodes of\"), a question to the reader (\"Why is everyone acting so "
             "dumb?\"), or a reaction in the margin (\"honestly\", \"smh\", \"unfair\", "
             "\"I love it\"). A true, clever observation with nobody in it is exactly "
-            "the draft this gate exists to stop.\n\nVary the shape. Opening every "
+            "the draft this gate exists to stop.\n\n"
+            "AND SAY HOW IT LANDED, also checked in code. Being in the post is not "
+            "the same as feeling something in it: \"Just paid $7 for a Crumbl "
+            "cookie that will be gone next week\" is a receipt. Before you write, "
+            "pick the one feeling they actually had about this: amused, annoyed, "
+            "suspicious, embarrassed, impressed, jealous, confused, disappointed, "
+            "delighted, nervous, guilty, sold. Then let it show the way they do: in "
+            "a word (\"Unfair.\"), a reaction (\"I love it.\", \"smh\"), an "
+            "admission (\"my LIC agent looks suspicious to me now\"), or a "
+            "reaction emoji. A clever comparison is not a feeling; it is what the "
+            "machine writes instead of one.\n\nVary the shape. Opening every "
             "post with \"Just watched\" or closing every one with the same emoji "
             "turns the fix into a new tic: they sign off with an emoji in about "
             "one post in four, on four different ones, and a sign-off that "
@@ -370,6 +380,7 @@ def selftest():
     b = build_draft_prompt("v", "t", "banger")
     a = build_draft_prompt("v", "t", "analytical")
     assert "PUT YOURSELF IN THE POST" in b and "checked in code" in b
+    assert "SAY HOW IT LANDED" in b and "SAY HOW IT LANDED" not in a
     assert "PUT YOURSELF IN THE POST" not in a
     assert "allowed to be impersonal" in a
     assert "never as throat-clearing" in b

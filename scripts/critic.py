@@ -107,6 +107,19 @@ SLOP_PATTERNS = (
     # catches one of them catches half the drafts.
     (r"(?i)\bit['\u2019]?s not (?:just )?(?:about )?[^.!?]{1,45}, it['\u2019]?s\b",
      "not-X-it's-Y contrast"),
+    # The pattern above only knew "It's not X, it's Y". "That's not a bakery,
+    # it's Supreme's drop model with frosting" shipped to the inbox on
+    # 2026-10-18 because the subject was "That". Any pronoun subject, any
+    # negation, comma or full stop between the halves. It also catches one of
+    # Lessin's real posts ("That's not a bug. That's the whole story..."): the
+    # construction is human once, and a tell the fifth time, and this engine
+    # does not know which time it is on.
+    (r"(?i)\b(?:it|that|this|these|those|they|he|she)"
+     r"(?:['\u2019]s\s+not|\s+is\s+not|\s+isn['\u2019]t|['\u2019]re\s+not|"
+     r"\s+are\s+not|\s+aren['\u2019]t|\s+was\s+not|\s+wasn['\u2019]t)"
+     r"\s+(?:just\s+)?(?:about\s+)?[^.!?]{1,45}[,.;:]\s*"
+     r"(?:it|that|this|they|he|she)(?:['\u2019]s|['\u2019]re|\s+is|\s+are|\s+was)\b",
+     "not-X-it's-Y contrast"),
     (r"(?i)\bhere (?:is|['\u2019]s) the thing\b", "throat-clearing opener"),
     (r"(?i)^\s*here['\u2019]?s (?:what|why)\b", "throat-clearing opener"),
     (r"(?i)\bthe thing is,", "throat-clearing opener"),
@@ -135,7 +148,10 @@ STOP_SLOP_UNIVERSAL = [
 ]
 STOP_SLOP_LONGFORM_ONLY = [
     "pull-quote bait, a line engineered to sound quotable reads as AI",
-    "dramatic fragmentation for effect, vary sentence length instead",
+    "dramatic fragmentation for rhythm: runs of noun fragments like 'Speed. Scale. "
+    "Trust.' or 'Not a bakery. A drop.' A single short reaction that carries a "
+    "feeling ('Unfair.', 'I love it.', 'smh.', 'Not surprising.') is NOT this tell: "
+    "65% of the author's own posts contain one, so do not dock it",
 ]
 
 
@@ -640,6 +656,54 @@ OTHERS_VIEW = re.compile(
     r"everyone(?:['\u2019]s| is) acting)\b", re.I)
 
 
+# --- feeling --------------------------------------------------------------
+#
+# Presence was not enough. "Just paid $7 for a Crumbl cookie that will be gone
+# from the menu next week" has the author in it and no feeling at all: it is a
+# receipt. Measured on his posts against the reference writers and our drafts:
+#
+#                                   him    Hobart/Tavel/Lessin   ours (bangers)
+#   names or shows a feeling        65%          18%                57%
+#   a 1-3 word reaction ("Unfair.") 65%          14%
+#
+# Two things follow. The reference writers are dry, so emotion is the part of
+# this voice that is specifically his, not something borrowed from them. And
+# his posts without a feeling are all his data posts ("Q1 2026: $300B of
+# venture funding..."); his reactions nearly always carry one. So a banger,
+# which is a reaction, must name or show a feeling, and analytical posts stay
+# as dry as his do.
+#
+# The vocabulary is the GoEmotions taxonomy (Google, 27 labels from 58k Reddit
+# comments) written the way people actually type those feelings, plus the
+# slang and punctuation that VADER documents as intensity. EmoLex and LIWC were
+# considered and are not used: both need a paid licence for commercial use.
+FEELING = re.compile(
+    r"\b(love|loved|lovely|hate|hated|scary|scared|terrified|annoy\w*|"
+    r"frustrat\w*|embarrass\w*|jealous|obsessed|mad|furious|unfair|respect|"
+    r"proud|ashamed|guilty|sad|gutted|thrilled|excited|bored|confus\w*|"
+    r"suspicious|regret\w*|relieved|disgust\w*|cringe|hurts|delight\w*|insane|"
+    r"wild|crazy|dumb|stupid|ridiculous|absurd|bonkers|amazing|beautiful|grim|"
+    r"weird|creepy|nervous|worried|afraid|surprising|brutal|iconic|yikes|ugh|"
+    r"smh|lol|lmao|god damn|damn|hilarious|painful|petty|furious|salty|"
+    r"miss it|can['\u2019]t stop|i['\u2019]m sold|rent free)\b", re.I)
+FEELING_REGISTERS = frozenset({"banger"})
+
+
+def feelings(draft):
+    """The feeling words a draft uses, lowercased."""
+    return {m.group(0).lower() for m in FEELING.finditer(draft or "")}
+
+
+def has_feeling(draft):
+    """Does the post say how the author felt, not only what happened to them?
+
+    A named feeling ("suspicious", "I love it", "unfair"), a reaction in slang
+    ("smh"), an exclamation, or a reaction emoji. "Just paid $7" is presence;
+    "Just paid $7 and I'm annoyed at how happy it made me" is a feeling."""
+    text = draft or ""
+    return bool(FEELING.search(text) or "!" in text or EMOJI.search(text))
+
+
 STANCE_WORDS = (
     "honestly", "i wonder", "my guess", "probably", "maybe", "i think",
     "i suspect", "i bet", "not sure", "i conclude", "odd", "kinda", "smh",
@@ -648,9 +712,13 @@ STANCE_WORDS = (
 
 
 def stance_words(draft):
-    """Which uncertainty markers a draft uses, lowercased."""
+    """Which uncertainty markers and feeling words a draft uses, lowercased.
+
+    Feeling words share the hedges' budget for the same reason: anything newly
+    required gets grabbed and repeated ("unfair" in every banger would be the
+    🤌🏻 problem again)."""
     text = (draft or "").lower().replace("\u2019", "'")
-    return {w for w in STANCE_WORDS if w in text}
+    return {w for w in STANCE_WORDS if w in text} | feelings(text)
 
 
 def recent_stance_words(generated_path, lookback=2):
@@ -788,6 +856,11 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
         return "FAIL", (
             "nobody in the post: a banger is him reacting to something, so it "
             "needs I/my, the moment he met it, a question, or a reaction"
+        )
+    if register in FEELING_REGISTERS and not has_feeling(draft):
+        return "FAIL", (
+            "no feeling: he is in the post but never says how it landed. Name "
+            "it (annoyed, suspicious, I love it, unfair, smh) or show it"
         )
     hits = slop_hits(draft)
     if hits:
@@ -1227,7 +1300,9 @@ def selftest():
     assert decide(clean, authorless, register="banger")[0] == "FAIL"
     assert decide(clean, authorless, register="analytical")[0] == "PASS"
     assert decide(clean, authorless, register=None)[0] == "PASS"
-    assert decide(clean, "Just read it. The fish is still dead.",
+    # His fish post as he wrote it, with the 🕺🕺 doing the feeling. Without
+    # them it has presence and no feeling, and the feeling gate (below) says so.
+    assert decide(clean, "Just read it. The fish is still dead. \U0001F57A\U0001F57A",
                   register="banger")[0] == "PASS"
     # A capital letter at the start of a sentence is not a proper noun.
     assert "people" not in motifs("People keep calling it a retreat.")
@@ -1260,8 +1335,27 @@ def selftest():
                      "letter and calls that transparency.")
     assert not slop_hits("Most teams are just scratching the surface.")
 
+    # Presence is not feeling. The Crumbl receipt has one and not the other.
+    receipt = ("Just paid $7 for a Crumbl cookie that will be gone from the "
+               "menu next week.")
+    assert has_presence(receipt) and not has_feeling(receipt)
+    assert decide(clean, receipt, register="banger")[0] == "FAIL"
+    assert decide(clean, receipt, register="analytical")[0] == "PASS"
+    assert has_feeling("The performance has broken my fraud detection. Unfair.")
+    assert has_feeling("Whatever it is. I love it.")
+    assert has_feeling("Stop copying other people's work. smh.")
+    assert decide(clean, "Just paid $7 for a Crumbl cookie. Unfair how good it was.",
+                  register="banger")[0] == "PASS"
+    assert decide(clean, "Just paid $7 for a Crumbl cookie. Unfair how good it was.",
+                  register="banger", banned_stance={"unfair"})[0] == "FAIL"
+
+    # The Crumbl draft, which shipped because its subject was "That".
+    assert slop_hits("Just paid $7 for a Crumbl cookie. That's not a bakery, "
+                     "it's Supreme's drop model with frosting.")
+    assert slop_hits("They aren't selling cookies, they're selling a line.")
+
     # A hedge that repeats is a tic: same budget as the sign-off emoji.
-    assert stance_words("Honestly I respect the funnel.") == {"honestly"}
+    assert stance_words("Honestly I respect the funnel.") == {"honestly", "respect"}
     assert decide(clean, "Honestly I respect the funnel.",
                   banned_stance={"honestly"})[0] == "FAIL"
     assert decide(clean, "My guess is it goes the same way.",
@@ -1275,7 +1369,7 @@ def selftest():
                   register="banger", emoji_cooling=True)[0] == "FAIL"
     assert decide(clean, "Just read it. The fish is still dead. \U0001F57A",
                   register="banger", emoji_cooling=False)[0] == "PASS"
-    assert decide(clean, "Just read it. The fish is still dead.",
+    assert decide(clean, "Just read it. The fish is still dead, smh.",
                   register="banger", emoji_cooling=True)[0] == "PASS"
 
     # Presence is not a licence: the other vetoes still run first.
