@@ -39,6 +39,20 @@ import llm
 from karamel_common import DATA, ROOT, has_em_dash, now_et, now_iso
 
 EXEMPLAR = ROOT / "03_voice_card.md"          # structural bar, never copied
+# Where the exemplar can live. The root copy exists only in the source tree:
+# 03_voice_card.md is personal and is never packaged, so on every installed
+# copy (the host, Thomas's Mac) EXEMPLAR.read_text() raised FileNotFoundError
+# and the generator could not run at all. Installs keep the owner's card under
+# data/voice_cards/, which is the fallback.
+EXEMPLAR_CANDIDATES = (EXEMPLAR, DATA / "voice_cards" / "03_voice_card.md")
+
+
+def find_exemplar(explicit=None):
+    """The exemplar card to use, or None. An explicit path wins."""
+    for p in ([Path(explicit).expanduser()] if explicit else []) + list(EXEMPLAR_CANDIDATES):
+        if p.is_file():
+            return p
+    return None
 OUT_DIR = DATA / "voice_cards"
 INTAKES_DIR = DATA / "intakes"
 EM_DASH = re.compile(r"\s*[—–]\s*")  # collapse surrounding space so a scrub leaves no double gap
@@ -218,7 +232,7 @@ def main():
 
     if "--intake" not in sys.argv:
         print("usage: voice_card_generator.py --intake PATH [--print] "
-              "[--dry-run] [--slug NAME]", file=sys.stderr)
+              "[--dry-run] [--slug NAME] [--exemplar CARD]", file=sys.stderr)
         print("       voice_card_generator.py --print-template", file=sys.stderr)
         return 2
 
@@ -238,7 +252,15 @@ def main():
         print(f"intake error: {e}", file=sys.stderr)
         return 2
     slug = slug or slugify(intake.get("name"))
-    prompt = build_generation_prompt(intake, EXEMPLAR.read_text())
+    explicit = (sys.argv[sys.argv.index("--exemplar") + 1]
+                if "--exemplar" in sys.argv else None)
+    exemplar = find_exemplar(explicit)
+    if exemplar is None:
+        print("no exemplar card found; pass --exemplar PATH (looked in: "
+              + ", ".join(str(p) for p in EXEMPLAR_CANDIDATES) + ")",
+              file=sys.stderr)
+        return 2
+    prompt = build_generation_prompt(intake, exemplar.read_text())
 
     if dry_run:
         print(prompt)
