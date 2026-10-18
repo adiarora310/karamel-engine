@@ -374,10 +374,44 @@ def check_gate():
                  "./karamel draft, and read the scores", level=WARN)
 
 
+def check_emotion():
+    """Is the GoEmotions model reading drafts on this machine, and does each
+    tenant have their own writing for a palette?
+
+    Without this the model can be missing on an install for good and nothing
+    says so: the engine quietly falls back to the word list, drafts still go
+    out, and from the outside a feeling-blind install looks exactly like a
+    working one. A warning, not a failure, for that same reason."""
+    try:
+        import emotion
+        import tenants
+    except ImportError as e:
+        return Check("emotion model", False, f"module missing: {e}",
+                     "./karamel update", level=WARN)
+    if not emotion.available():
+        what = []
+        if not emotion.packages_present():
+            what.append("packages missing (" + ", ".join(emotion.PACKAGES) + ")")
+        if not emotion.model_present():
+            what.append("model not downloaded")
+        return Check("emotion model", False,
+                     "; ".join(what) or "present but failed to load",
+                     "./karamel update (installs and verifies it)", level=WARN)
+    no_palette = [t.id for t in tenants.list_tenants()
+                  if not emotion.read_samples(t.samples_path)]
+    if no_palette:
+        return Check("emotion model", False,
+                     f"ready, but no samples.jsonl for {', '.join(no_palette)}, "
+                     "so they have no emotional palette",
+                     "add their own writing, one {\"text\": ...} per line",
+                     level=WARN)
+    return Check("emotion model", True, "GoEmotions ready; every tenant has a palette")
+
+
 def run_checks(deep=False):
     return [check_python(), check_key(deep), check_tenant(), check_voice_card(),
             check_channel(), check_playwright(), check_halt(), check_agents(),
-            check_recent_draft(), check_gate()]
+            check_recent_draft(), check_gate(), check_emotion()]
 
 
 # ------------------------------------------------------------------ log tailing
