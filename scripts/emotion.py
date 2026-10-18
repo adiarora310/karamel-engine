@@ -305,10 +305,20 @@ def selftest():
     if available():
         receipt = score("Just paid $7 for a Crumbl cookie that will be gone "
                         "from the menu next week.")
-        assert receipt["neutral"] > 0.6, receipt["neutral"]
+        assert receipt["neutral"] > 0.6, receipt["neutral"]  # 0.71 / 0.89
         assert top(score("Someone raised money to build a toilet that drives "
                          "itself to you. Whatever it is. I love it."))[0] == "love"
-        assert rescues("Stop copying other people's work. smh.") is True
+        # Only cases with a wide margin. The INT8 model's raw numbers differ by
+        # chip: on 2026-10-18 the Crumbl receipt read 0.89 neutral on an Apple
+        # M-series Mac (onnxruntime 1.31) and 0.71 on the Intel host (1.19.2),
+        # and "smh" went from 0.39 to 0.48, which flips a 0.4 threshold. The
+        # gate's decisions did not move on either machine (10/10 of his
+        # reaction posts, 0/59 authorless bangers), and these assertions are
+        # chosen to hold on both.
+        assert rescues("Someone raised money to build a toilet that drives "
+                       "itself to you. Whatever it is. I love it.") is True
+        assert rescues("Just paid $7 for a Crumbl cookie that will be gone "
+                       "from the menu next week.") is False
         print("emotion selftest: all assertions passed (model loaded)")
     else:
         print("emotion selftest: all assertions passed (model not installed, "
