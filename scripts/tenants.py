@@ -356,8 +356,12 @@ class Tenant:
 
     @property
     def samples_path(self):
-        """Their own real writing, one {"text": ...} per line. Read for the
-        emotional palette; never quoted into a draft. Kept apart from the voice
+        """RETIRED for the X palette on 2026-10-19: palettes now come from
+        approved drafts (emotion.approved_texts), not past writing. Kept for
+        callers that still pass it; the files were moved aside.
+
+        Was: their own real writing, one {"text": ...} per line, read for the
+        emotional palette and never quoted into a draft. Kept apart from the voice
         card on purpose: the card also quotes counter-examples and bad drafts
         it warns against, and a palette measured from those is contaminated."""
         return self.data_dir / "samples.jsonl"

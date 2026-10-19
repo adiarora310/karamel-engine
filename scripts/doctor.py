@@ -397,15 +397,14 @@ def check_emotion():
         return Check("emotion model", False,
                      "; ".join(what) or "present but failed to load",
                      "./karamel update (installs and verifies it)", level=WARN)
-    no_palette = [t.id for t in tenants.list_tenants()
-                  if not emotion.read_samples(t.samples_path)]
-    if no_palette:
-        return Check("emotion model", False,
-                     f"ready, but no samples.jsonl for {', '.join(no_palette)}, "
-                     "so they have no emotional palette",
-                     "add their own writing, one {\"text\": ...} per line",
-                     level=WARN)
-    return Check("emotion model", True, "GoEmotions ready; every tenant has a palette")
+    # Palettes are built from approved drafts only, so a new tenant has none
+    # for a while by design. Progress, not a warning.
+    need = emotion.PALETTE_MIN_APPROVED
+    progress = ", ".join(
+        f"{t.id} {min(emotion.approved_count(t.data_dir), need)}/{need}"
+        for t in tenants.list_tenants())
+    return Check("emotion model", True,
+                 f"GoEmotions ready; palettes from approved drafts: {progress}")
 
 
 def run_checks(deep=False):

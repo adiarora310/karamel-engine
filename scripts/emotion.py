@@ -240,8 +240,10 @@ def describe(pal, author="them"):
     g = pal["groups"]
     leads = ", ".join(list(pal["leads"])[:6])
     tilt = max(g, key=g.get)
-    line = (f"Emotional palette, measured from {author}'s own writing "
-            f"({pal['n_with_feeling']} of {pal['n_texts']} samples carry a feeling): "
+    where = (f"the {pal['n_texts']} drafts {author} approved"
+             if pal.get("source") == "approved" else f"{author}'s own writing")
+    line = (f"Emotional palette, measured from {where} "
+            f"({pal['n_with_feeling']} of {pal['n_texts']} carry a feeling): "
             f"mostly {leads}. Sentiment mix: {int(g['negative'] * 100)}% negative, "
             f"{int(g['ambiguous'] * 100)}% uncertain or curious, "
             f"{int(g['positive'] * 100)}% positive.")
@@ -250,6 +252,82 @@ def describe(pal, author="them"):
                  "person mostly does not, so a warm or impressed draft needs a "
                  f"reason. Lean {tilt}.")
     return line
+
+
+# --- palettes from approved drafts -------------------------------------------
+#
+# Adi, 2026-10-19: "rebuild palettes from approved drafts going forward". The
+# rule is that Karamel learns from ongoing behaviour, not from reading past
+# activity, and the first palettes were measured from past writing (his
+# 17 old posts, Khoa's podcast). A palette now comes only from drafts the
+# person approved: replied Posted to, edited and posted, or posted and found
+# by engagement.py. Until there are PALETTE_MIN_APPROVED of them there is no
+# palette and no drift check, rather than a fallback to the old writing.
+PALETTE_MIN_APPROVED = 5
+APPROVED_STATUSES = frozenset({"posted_clean", "posted_edited"})
+
+
+def _jsonl(path):
+    p = Path(path)
+    if not p.is_file():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def approved_texts(data_dir):
+    """The text of every draft this person approved, as they posted it."""
+    if not data_dir:
+        return []
+    d = Path(data_dir)
+    detected = {r.get("draft_id") for r in _jsonl(d / "engagement_metrics.jsonl")}
+    out = []
+    for r in _jsonl(d / "original_drafts.jsonl"):
+        if r.get("status") in APPROVED_STATUSES or r.get("draft_id") in detected:
+            text = r.get("edited_text") or r.get("draft_text")
+            if text:
+                out.append(text)
+    return out
+
+
+def _mtime(p):
+    try:
+        return Path(p).stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+@functools.lru_cache(maxsize=16)
+def _approved_palette(dir_str, m_drafts, m_metrics):
+    texts = approved_texts(dir_str)
+    if len(texts) < PALETTE_MIN_APPROVED:
+        return None
+    pal = palette(texts)
+    if pal:
+        pal["source"] = "approved"
+    return pal
+
+
+def palette_from_approved(data_dir):
+    """The palette from approved drafts, or None until there are enough."""
+    if not data_dir:
+        return None
+    d = Path(data_dir)
+    return _approved_palette(str(d), _mtime(d / "original_drafts.jsonl"),
+                             _mtime(d / "engagement_metrics.jsonl"))
+
+
+def approved_palette_line(data_dir, author="them"):
+    return describe(palette_from_approved(data_dir), author)
+
+
+def approved_count(data_dir):
+    return len(approved_texts(data_dir))
 
 
 def read_samples(path):
@@ -348,6 +426,19 @@ def selftest():
                     "Adi")
     assert "annoyance, curiosity" in line and "approving" in line
     assert drift_avoid(["a", "b"], None) is None
+    # Approved drafts only: Posted, edited-and-posted, or found posted; never
+    # skipped, never merely delivered.
+    _d = Path(_tf.mkdtemp())
+    (_d / "original_drafts.jsonl").write_text("\n".join(json.dumps(r) for r in (
+        {"draft_id": 1, "status": "posted_clean", "draft_text": "kept as sent"},
+        {"draft_id": 2, "status": "posted_edited", "draft_text": "x", "edited_text": "their edit"},
+        {"draft_id": 3, "status": "skipped", "draft_text": "binned"},
+        {"draft_id": 4, "status": "pending", "draft_text": "found on profile"},
+        {"draft_id": 5, "status": "pending", "draft_text": "never posted"})))
+    (_d / "engagement_metrics.jsonl").write_text(json.dumps({"draft_id": 4}))
+    assert approved_texts(_d) == ["kept as sent", "their edit", "found on profile"], approved_texts(_d)
+    assert palette_from_approved(_d) is None, "below the minimum there is no palette"
+    assert approved_palette_line(None) == "" and approved_count(None) == 0
     if available():
         adi_like = {"groups": {"negative": 0.56, "ambiguous": 0.22, "positive": 0.22}}
         warm = ["Someone raised money to build a toilet that drives itself to you. "

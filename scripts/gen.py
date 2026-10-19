@@ -388,13 +388,15 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     cooling = critic.topic_exempt(critic.recent_motifs(log_for_rules), topic)
     # Their emotional range, measured by the GoEmotions model from their own
     # writing. Empty when there is no samples file or no model installed.
-    if samples_path is None and log_for_rules:
-        samples_path = Path(log_for_rules).parent / "samples.jsonl"
+    # The palette comes from drafts this person approved, in their own data
+    # dir, and from nothing else (Adi, 2026-10-19). samples_path is accepted
+    # for old callers and ignored: past writing no longer shapes a palette.
+    data_dir = Path(log_for_rules).parent if log_for_rules else None
     try:
         import emotion
-        pal = emotion.palette_line(samples_path, author or "them")
+        pal = emotion.approved_palette_line(data_dir, author or "them")
         avoid = emotion.drift_avoid(critic.shipped_finals(log_for_rules),
-                                    emotion.palette_for(samples_path))
+                                    emotion.palette_from_approved(data_dir))
     except Exception:
         pal, avoid = "", None
     if avoid:
