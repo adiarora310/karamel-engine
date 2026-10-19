@@ -289,7 +289,14 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
         "still leaves the position explicit), and uses one of these facts as "
         "the evidence, not all of them. Never leave the reader to infer the "
         f"stance from facts placed side by side: say it. A reader must be able "
-        f"to say in one line what {who} thinks.\n{ctx_text}\n" if ctx_text else
+        f"to say in one line what {who} thinks.\n"
+        "The voice card outranks the research. If their hard-no lines forbid "
+        "criticising named people or companies, a name in these facts is never "
+        "the target: aim at the behaviour, and drop the name if the post would "
+        "read as a dig at it. Open the way their card says they open, not on "
+        "the news item; the fact is evidence, not the lead. And check the "
+        "evidence actually proves the stance (a filing is not a customer).\n"
+        f"{ctx_text}\n" if ctx_text else
         f"\nTake a clear stance {who} would defend, not just a topic. A reader "
         "must be able to say in one line what they think.\n")
     if palette:
