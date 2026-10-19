@@ -47,6 +47,10 @@ AGENTS_SPEC = {
     "drafter": ("drafter.py", [], 1200),
     "notifier": ("notifier.py", [], 1200),
     "inbox": ("inbox.py", ["--once"], 300),
+    # LinkedIn, beside X rather than inside it (linkedin.py). Every ten minutes
+    # so a reply asking for a change comes back while the person is still in
+    # their inbox; drafting happens only in their due hour, and only once in it.
+    "linkedin": ("linkedin.py", ["--tick"], 600),
     # --all, and daily rather than weekly, for the same two reasons reflector
     # takes --all: a digest for one person on a shared box silently drops
     # everybody else, and the weekly gate lives in the script's watermark so a

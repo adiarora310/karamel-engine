@@ -150,7 +150,11 @@ def topic_context(voice, topic, author, tenant=None, lanes=()):
         f"2. Decide the stance {author} would take on it, from the beliefs and "
         f"skepticisms in their voice card. A stance is a position someone could "
         f"disagree with ('Tesla's flying-car claims are a stock story, not a "
-        f"product'), not a topic ('flying cars are interesting').\n\n"
+        f"product'), not a topic ('flying cars are interesting'). It must obey "
+        f"the card's hard-no lines: if they never criticise named people or "
+        f"companies, aim it at the behaviour or the archetype ('a demo flight is "
+        f"not a customer'), and use the named company only as the example. One "
+        f"sentence, at most 15 words, so it fits in a short post.\n\n"
         f"Return ONLY a JSON object, no prose, no code fence:\n"
         f'{{"facts": [{{"date": "YYYY-MM-DD", "fact": "one sentence", "source": '
         f'"domain"}}], "stance": "one first-person sentence", "why": "which of '
@@ -280,10 +284,12 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
         )
     ctx_text = context_block(context)
     ctx_note = (
-        "\nCURRENT CONTEXT, researched today. The post takes the stance below, or "
-        "a sharper version of it in their voice, and uses these facts rather "
-        "than invented ones. A reader must be able to say in one line what "
-        f"{who} thinks.\n{ctx_text}\n" if ctx_text else
+        "\nCURRENT CONTEXT, researched today. The post states the stance below "
+        "in so many words, in their voice (their own hedge is fine: 'I think' "
+        "still leaves the position explicit), and uses one of these facts as "
+        "the evidence, not all of them. Never leave the reader to infer the "
+        f"stance from facts placed side by side: say it. A reader must be able "
+        f"to say in one line what {who} thinks.\n{ctx_text}\n" if ctx_text else
         f"\nTake a clear stance {who} would defend, not just a topic. A reader "
         "must be able to say in one line what they think.\n")
     if palette:

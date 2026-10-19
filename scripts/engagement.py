@@ -141,10 +141,14 @@ def parse_count(s):
 def parse_group_label(label):
     """X's action-bar aria-label, e.g. '3 replies, 5 reposts, 40 likes, 1234 views'."""
     out = {}
+    # X leaves a zero out of the label entirely ("1 reply, 1 like, 45 views"
+    # has no reposts), so on a post that has a label, absent means 0. Only a
+    # missing label means unknown.
+    absent = 0 if (label or "").strip() else None
     for key, word in (("replies", "repl"), ("reposts", "repost"),
                       ("likes", "like"), ("views", "view")):
-        m = re.search(r"([\d,\.]+[KkMm]?)\s+" + word, label or "")
-        out[key] = parse_count(m.group(1)) if m else None
+        m = re.search(r"([\d,\.]+[KkMm]?)\s+" + word, label or "", re.IGNORECASE)
+        out[key] = parse_count(m.group(1)) if m else absent
     return out
 
 
@@ -316,6 +320,7 @@ def selftest():
     g = parse_group_label("3 replies, 5 reposts, 40 likes, 1,234 views")
     assert g == {"replies": 3, "reposts": 5, "likes": 40, "views": 1234}, g
     assert parse_group_label("")["likes"] is None
+    assert parse_group_label("1 reply, 1 like, 45 views")["reposts"] == 0
     m = STATUS_RE.search("Posted https://x.com/KhoaMaNYC/status/1234567890123?s=20")
     assert m and m.group(1) == "KhoaMaNYC" and m.group(2) == "1234567890123"
     assert STATUS_RE.search("https://twitter.com/a/status/987654321")

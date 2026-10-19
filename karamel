@@ -409,7 +409,7 @@ def cmd_start():
     # had never run once, on any install, for anybody.
     for label in (("heartbeat", "doctor", "operator-report", "updater",
                    "dashboard", "weekly-digester")
-                  + _reply_agents() + _reading_agents()):
+                  + _reply_agents() + _reading_agents() + _linkedin_agents()):
         p = agents / f"com.karamel.{label}.plist"
         if not p.exists():
             continue
@@ -449,6 +449,24 @@ def _reading_agents():
     # launchd cannot log into anything, and a KeepAlive Chrome racing a manual
     # one for the same profile opened a window every thirty seconds.
     return ("listener", "evaluator", "drafter", "notifier")
+
+
+def _linkedin_agents():
+    """The LinkedIn lane's agent, and only when someone on this box has the
+    lane switched on with a "linkedin" block in their tenant record.
+
+    Same reasoning as the reading half: an agent that can only ever find
+    nothing to do should not be running and logging that it found nothing."""
+    try:
+        import linkedin
+        on = [t.id for t in linkedin.lanes_with_linkedin()]
+    except Exception as e:
+        say(f"  linkedin lane stays off: {type(e).__name__}: {e}")
+        return ()
+    if not on:
+        say("  linkedin lane stays off: no tenant has it switched on")
+        return ()
+    return ("linkedin",)
 
 
 def _reply_agents():
