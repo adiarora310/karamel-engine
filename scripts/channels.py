@@ -135,7 +135,7 @@ def auth_failure_hint(cfg, err):
     return "\n  ".join(lines)
 
 
-def send_email(tenant, text, subject=None):
+def send_email(tenant, text, subject=None, in_reply_to=None):
     """Deliver one draft by email. Returns the Message-ID.
 
     The Message-ID is how inbox.py matches a reply back to its draft. It is
@@ -165,6 +165,11 @@ def send_email(tenant, text, subject=None):
         msg["Reply-To"] = cfg["reply_to"]
     mid = make_msgid(domain=cfg["from_address"].split("@")[-1])
     msg["Message-ID"] = mid
+    if in_reply_to:
+        # Threads a revised draft under the reply that asked for it, so the
+        # conversation about one draft stays one conversation.
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg.set_content(text)
 
     port = int(cfg["smtp_port"])
@@ -243,7 +248,7 @@ BACKENDS = {
 }
 
 
-def send(tenant, text, dry=False, subject=None):
+def send(tenant, text, dry=False, subject=None, in_reply_to=None):
     """Deliver one message to a tenant's channel. Returns a message id or None.
 
     dry=True always routes to stdout regardless of configured channel, so a dry
@@ -264,7 +269,7 @@ def send(tenant, text, dry=False, subject=None):
     if backend is None:
         raise ValueError(f"unknown channel type {kind!r} for tenant {tenant.id!r}")
     if kind == "email":
-        return backend(tenant, text, subject=subject)
+        return backend(tenant, text, subject=subject, in_reply_to=in_reply_to)
     return backend(tenant, text)
 
 

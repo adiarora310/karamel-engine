@@ -224,6 +224,83 @@ def tenant_for_sender(addr):
     return None
 
 
+POSTED_WORDS = frozenset({"posted", "post", "p", "done", "live", "✅"})
+SKIP_WORDS = frozenset({"skip", "skipped", "s", "pass", "❌"})
+EDIT_PREFIX = re.compile(r"^\s*(?:✏️?|edited\b|edit\b)[\s:,-]*", re.IGNORECASE)
+STATUS_MAX_WORDS = 3
+
+
+def classify_reply(text):
+    """(intent, payload, url) for one reply, quoted original already stripped.
+
+    intent is posted_clean, posted_edited, skipped, revise, or None.
+
+    poller.parse_reply_tokens matches single letters anywhere ("p", "s", "e"),
+    which was fine for Telegram's one-tap answers and wrong for an email that
+    asks for changes: "it's too long" contains a standalone "s" and read as a
+    Skip. Since 2026-10-19 a free-text reply is a request to revise the draft
+    (Khoa: "let the user edit a draft and reply with changes"), so a status
+    word only counts when the reply is that word and little else."""
+    text = (text or "").strip()
+    m = poller.URL_RE.search(text)
+    url = m.group(0) if m else None
+    clean = poller.URL_RE.sub("", text).strip()
+    if not clean:
+        return ("posted_clean", None, url) if url else (None, None, None)
+    em = EDIT_PREFIX.match(clean)
+    if em and clean[em.end():].strip():
+        return "posted_edited", clean[em.end():].strip(), url
+    words = re.findall(r"[\w']+|✅|❌", clean.lower())
+    if 0 < len(words) <= STATUS_MAX_WORDS:
+        if any(w in POSTED_WORDS for w in words):
+            return "posted_clean", None, url
+        if any(w in SKIP_WORDS for w in words):
+            return "skipped", None, url
+    return "revise", clean, url
+
+
+def revise_and_send(tenant, path, rows, i, request, msg):
+    """Write the revision, send it back in the same thread, log the learning."""
+    import time
+    import channels
+    import gen
+    import heartbeat
+
+    draft = rows[i]
+    voice = tenant.voice_card_path.read_text()
+    new_text = gen.revise_draft(
+        voice, draft.get("draft_text") or "", request, tenant.name, tenant=tenant.id,
+        max_chars=getattr(tenant, "max_chars", None),
+        allow_em_dash=getattr(tenant, "allow_em_dash", False))
+    if not new_text:
+        return (f"[{tenant.id}] could not revise #{draft.get('draft_id')} within "
+                f"the hard rules; request kept for learning")
+    new_id = int(time.time() * 1000)
+    body = heartbeat.format_draft(draft.get("register"), draft.get("topic") or "",
+                                  new_text, {}, tenant.now(), draft_id=new_id)
+    subject = heartbeat.subject_for("Revised draft", draft.get("lane") or "Your edit")
+    mid = channels.send(tenant, body, subject=subject,
+                        in_reply_to=header(msg, "Message-ID") or None)
+    append_jsonl(tenant.original_drafts_path, {
+        "draft_id": new_id, "tenant": tenant.id, "kind": "original",
+        "topic": draft.get("topic"), "register": draft.get("register"),
+        "lane": draft.get("lane"), "draft_text": new_text, "status": "pending",
+        "needs_verify": [], "telegram_msg_id": mid, "drafted_at": now_iso(),
+        "revision_of": draft.get("draft_id"), "revision_request": request,
+    })
+    draft["revisions"] = int(draft.get("revisions") or 0) + 1
+    write_jsonl_atomic(path, rows)
+    return f"[{tenant.id}] #{draft.get('draft_id')} revised -> #{new_id}"
+
+
+def log_edit(tenant, row):
+    """Append one learning row; a failure here must never lose the reply."""
+    try:
+        append_jsonl(tenant.edits_path, {"ts": now_iso(), "tenant": tenant.id, **row})
+    except Exception:
+        pass
+
+
 def locate_draft(tenant, in_reply_to, draft_id):
     """(path, rows, index) for the draft this reply answers, or (None, None, None).
 
@@ -251,7 +328,7 @@ def apply_reply(tenant, msg, dry=False):
     subject = header(msg, "Subject")
     raw_body = body_text(msg)
     reply_text = strip_quoted(raw_body)
-    status, edited_text, reply_url = poller.parse_reply_tokens(reply_text)
+    status, edited_text, reply_url = classify_reply(reply_text)
     if status is None:
         return (f"[{tenant.id}] unrecognised reply to {subject[:50]!r}: "
                 f"{reply_text[:60]!r}")
@@ -278,6 +355,13 @@ def apply_reply(tenant, msg, dry=False):
                 f"{len(draft['needs_verify'])} blank(s); reply with the pencil "
                 f"and the finished text, not the check")
 
+    if status == "revise":
+        if dry:
+            return f"[{tenant.id}] would revise #{draft.get('draft_id')}: {edited_text[:60]!r}"
+        log_edit(tenant, {"kind": "revision_request", "draft_id": draft.get("draft_id"),
+                          "original": draft.get("draft_text"), "request": edited_text})
+        return revise_and_send(tenant, path, rows, i, edited_text, msg)
+
     if dry:
         return f"[{tenant.id}] would mark #{draft.get('draft_id')} {status}"
 
@@ -290,6 +374,9 @@ def apply_reply(tenant, msg, dry=False):
         draft["reply_url"] = reply_url
     write_jsonl_atomic(path, rows)
 
+    if status == "posted_edited" and edited_text:
+        log_edit(tenant, {"kind": "posted_edit", "draft_id": draft.get("draft_id"),
+                          "original": draft.get("draft_text"), "posted": edited_text})
     if status in ("posted_clean", "posted_edited"):
         append_jsonl(tenant.engagement_path, {
             "ts_iso": now_iso(),
@@ -661,6 +748,22 @@ def selftest():
         assert "blank" in out and "pencil" in out, out
     finally:
         globals()["locate_draft"] = _real_locate
+
+    # Free text is a change request; a status word only when it is the reply.
+    assert classify_reply("it's too long, make it punchier")[0] == "revise"
+    assert classify_reply("more skeptical of Tesla please")[0] == "revise"
+    assert classify_reply("Posted")[:2] == ("posted_clean", None)
+    assert classify_reply("posted, thanks!")[0] == "posted_clean"
+    assert classify_reply("Skip")[0] == "skipped"
+    assert classify_reply("❌")[0] == "skipped"
+    st, _, url = classify_reply("Posted https://x.com/KhoaMaNYC/status/1234567890123")
+    assert st == "posted_clean" and url.endswith("1234567890123"), (st, url)
+    assert classify_reply("https://x.com/a/status/1")[0] == "posted_clean"
+    st, txt, _ = classify_reply("Edited: LOIs are not customers. Ever.")
+    assert st == "posted_edited" and txt == "LOIs are not customers. Ever.", (st, txt)
+    st, txt, _ = classify_reply("✏️ shorter version")
+    assert st == "posted_edited" and txt == "shorter version", (st, txt)
+    assert classify_reply("")[0] is None
 
     print("inbox selftest: all assertions passed")
 

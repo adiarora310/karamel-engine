@@ -45,10 +45,155 @@ REGISTER_NOTE = {
 }
 
 
+EDITS_SHOWN = 8
+
+
+def recent_edits(edits_path, n=EDITS_SHOWN):
+    """The last few things this person changed, as lines for a brief.
+
+    The learning signal is their own ongoing behaviour: what they asked a draft
+    to become, and what they rewrote before posting. Nothing is read from their
+    past activity on X."""
+    import json as _json
+    from pathlib import Path as _P
+
+    p = _P(edits_path) if edits_path else None
+    if not p or not p.is_file():
+        return []
+    rows = []
+    for line in p.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(_json.loads(line))
+        except ValueError:
+            continue
+    out = []
+    for r in rows[-n:]:
+        if r.get("kind") == "revision_request" and r.get("request"):
+            out.append(f'- asked: "{r["request"][:200]}"')
+        elif r.get("kind") == "posted_edit" and r.get("posted"):
+            out.append(f'- rewrote "{(r.get("original") or "")[:140]}" as '
+                       f'"{r["posted"][:200]}"')
+    return out
+
+
+def learned_block(edits, who):
+    if not edits:
+        return ""
+    return (f"\nLEARNED FROM {who.upper()}'S OWN EDITS. These are their standing "
+            "preferences; apply them without being asked again:\n"
+            + "\n".join(edits) + "\n")
+
+
+def revise_draft(voice, draft_text, request, author, tenant=None, max_chars=None,
+                 allow_em_dash=False):
+    """Rewrite a delivered draft the way its person asked, in a reply.
+
+    Their request outranks the engine's own quotas (presence, feeling, thinking,
+    the cooldowns): those shape what the engine volunteers, and this is the
+    person telling it. The hard vetoes still run, because a revision is still
+    one tap from posting: length, dashes, unfilled blanks, refused constructions.
+    Returns the revised text, or None after two attempts that fail them."""
+    ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
+    prompt = (
+        f"You wrote this draft post on X for {author}:\n\"\"\"{draft_text}\"\"\"\n\n"
+        f"They replied asking for changes:\n\"\"\"{request}\"\"\"\n\n"
+        f"Rewrite the post applying exactly what they asked, and nothing else. If "
+        f"their reply is itself a rewritten version of the post, use it as the "
+        f"base and only tidy it. Keep it in their voice as the card describes. "
+        f"Hard limits: at most {ceiling} characters, one clear point, no "
+        f"em-dashes or en-dashes, no [VERIFY] placeholders.\n\n"
+        f"Output ONLY the post text."
+    )
+    clean = {a: 10 for a in critic.AXES}
+    for _ in range(2):
+        try:
+            out = critic.call_claude(prompt, system=voice, label="revise", tenant=tenant)
+        except Exception:
+            return None
+        out = out.strip().strip('"').strip()
+        if not allow_em_dash:
+            out = EM_DASH.sub(", ", out).strip()
+        verdict, why = critic.decide(clean, out, allow_em_dash=allow_em_dash,
+                                     max_chars=ceiling)
+        if verdict == "PASS":
+            return out
+        prompt += f"\n\nThat attempt was rejected: {why}. Fix exactly that."
+    return None
+
+
+CONTEXT_DAYS = 14
+
+
+def topic_context(voice, topic, author, tenant=None, lanes=()):
+    """Today's facts on the topic and the stance this person would take.
+
+    Khoa, 2026-10-19: a draft about flying taxis and cargo drones "would have
+    been better with context he cares about, like being skeptical of Tesla's
+    flying-car claims". A topic is not a take. This runs one web-searching call
+    before drafting: what happened in the last two weeks, and which side of it
+    this person is on, grounded in the stances in their own voice card.
+
+    Returns {"facts": [...], "stance": str, "why": str}, or an empty dict when
+    the search or the parse fails. Drafting must never stop because the
+    context step did."""
+    import json as _json
+    from datetime import date
+
+    lane_line = ", ".join(lanes) if lanes else "the lanes in their voice card"
+    prompt = (
+        f"You are researching {author}'s next post on X. Their voice card is in "
+        f"the system prompt.\n\nTOPIC: {topic}\nTHEIR LANES: {lane_line}\n"
+        f"TODAY: {date.today().isoformat()}\n\n"
+        f"1. Use web search to find what has actually happened on this topic in "
+        f"the last {CONTEXT_DAYS} days: announcements, numbers, claims people are "
+        f"making. Prefer primary sources.\n"
+        f"2. Decide the stance {author} would take on it, from the beliefs and "
+        f"skepticisms in their voice card. A stance is a position someone could "
+        f"disagree with ('Tesla's flying-car claims are a stock story, not a "
+        f"product'), not a topic ('flying cars are interesting').\n\n"
+        f"Return ONLY a JSON object, no prose, no code fence:\n"
+        f'{{"facts": [{{"date": "YYYY-MM-DD", "fact": "one sentence", "source": '
+        f'"domain"}}], "stance": "one first-person sentence", "why": "which of '
+        f'their beliefs it comes from"}}\n'
+        f"At most 3 facts, each dated and sourced. If nothing current turns up, "
+        f"return an empty facts list and still give the stance."
+    )
+    try:
+        import llm
+        out = llm.complete(prompt, system=voice, label="context", tenant=tenant,
+                           tools=llm.WEB_TOOLS)
+    except Exception:
+        return {}
+    i, j = out.find("{"), out.rfind("}")
+    if i < 0 or j <= i:
+        return {}
+    try:
+        data = _json.loads(out[i:j + 1])
+    except ValueError:
+        return {}
+    facts = [f for f in (data.get("facts") or [])
+             if isinstance(f, dict) and f.get("fact")][:3]
+    stance = str(data.get("stance") or "").strip()
+    return {"facts": facts, "stance": stance,
+            "why": str(data.get("why") or "").strip()} if (facts or stance) else {}
+
+
+def context_block(ctx):
+    """The context, as the maker and the critic both read it."""
+    if not ctx:
+        return ""
+    lines = []
+    if ctx.get("stance"):
+        lines.append(f"STANCE TO TAKE: {ctx['stance']}")
+    for f in ctx.get("facts") or []:
+        lines.append(f"- {f.get('date', '')}: {f['fact']} ({f.get('source', '')})")
+    return "\n".join(lines)
+
+
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
                        owe_thinking=False, banned_stance=(), palette="",
-                       require_feeling=True, owe_feeling=False):
+                       require_feeling=True, owe_feeling=False, context=None):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -61,6 +206,10 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                  "No em-dashes or en-dashes. ")
     reg_note = REGISTER_NOTE.get(register, "Pick the register that fits per the voice card.")
     ceiling = int(max_chars or critic.DEFAULT_MAX_CHARS)
+    # Measured 2026-10-19: Adi's real posts run a median of 195 characters and
+    # his best-performing one is 170; the drafts had drifted to 250-280.
+    aim_hi = max(60, ceiling - 20)
+    aim_lo = max(40, ceiling - 60)
     # Several patterns share a label (three regexes catch throat-clearing), and
     # the brief listed it three times, which reads as emphasis nobody intended.
     thinking_rule = ("\n\nThe last two posts were closed verdicts, so this one shows its "
@@ -129,6 +278,14 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "tic. There are plenty: I wonder, my guess, probably, no idea yet, "
             "I can't tell, maybe I have this wrong.\n"
         )
+    ctx_text = context_block(context)
+    ctx_note = (
+        "\nCURRENT CONTEXT, researched today. The post takes the stance below, or "
+        "a sharper version of it in their voice, and uses these facts rather "
+        "than invented ones. A reader must be able to say in one line what "
+        f"{who} thinks.\n{ctx_text}\n" if ctx_text else
+        f"\nTake a clear stance {who} would defend, not just a topic. A reader "
+        "must be able to say in one line what they think.\n")
     if palette:
         cooldown += f"\n{palette}\n"
     if owe_feeling:
@@ -144,6 +301,7 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
 
 TOPIC OR SEED: {topic}
 REGISTER: {register}. {reg_note}
+{ctx_note}
 
 Write ONE original post. The bar: {who} has to be somewhere in the argument. "This happened, then this happened" is an automatic fail. But a verdict is only one way to clear the bar, and leaning on it is what makes these read as machine-written: a question they actually have, a disagreement with something other people believe, a speculation, or a noticing that does not resolve all count, and on the accounts this voice is modelled on (Hobart, Tavel, Lessin) that is how most posts read. Do NOT reach for the three-beat shape of fact, clever reframe, universal law. Say something only {who} would say.{thinking_rule}
 
@@ -162,7 +320,7 @@ Real posts carry fingerprints: contractions, an aside, a hedge, a reaction. Use 
 
 IT MUST STAND ALONE. A stranger reads it cold, with nothing above it. Name who and what in the sentence that needs them: "my dog" rather than "she", the product rather than "it". A post that only makes sense to somebody who was in the room is rejected.
 
-LENGTH IS A HARD GATE: {ceiling} characters, counted. A draft over it is rejected before anything else is read, so write to the limit rather than trimming afterwards. This is a post, not an essay: one idea, said once. Do not add a closing line that restates what you already said.
+LENGTH IS A HARD GATE: {ceiling} characters, counted. A draft over it is rejected before anything else is read. Aim for {aim_lo} to {aim_hi}: shorter and tighter beats complete. ONE CLEAR POINT per draft: if you can name two separate points in it, cut one. No setup sentence before the point, no second example when one landed, no closing line that restates what you already said.
 
 These constructions are refused deterministically. A draft containing one is rejected no matter how good it is:
 {refused}
@@ -173,7 +331,8 @@ Output ONLY the post text, nothing else."""
 def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
                banned_motifs=(), owe_thinking=False, banned_stance=(),
-               palette="", require_feeling=True, owe_feeling=False):
+               palette="", require_feeling=True, owe_feeling=False,
+               context=None):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -185,7 +344,7 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            owe_thinking=owe_thinking,
                            banned_stance=banned_stance, palette=palette,
                            require_feeling=require_feeling,
-                           owe_feeling=owe_feeling),
+                           owe_feeling=owe_feeling, context=context),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -196,7 +355,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
                    max_chars=None, samples_path=None, require_feeling=True,
-                   feeling_quota=False):
+                   feeling_quota=False, lanes=(), research=True, edits_path=None):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -221,10 +380,24 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     try:
         import emotion
         pal = emotion.palette_line(samples_path, author or "them")
+        avoid = emotion.drift_avoid(critic.shipped_finals(log_for_rules),
+                                    emotion.palette_for(samples_path))
     except Exception:
-        pal = ""
+        pal, avoid = "", None
+    if avoid:
+        pal = (pal + f" Their last drafts have leaned {avoid}, which is rare for "
+               f"them: this one must not lead {avoid}. Checked in code.").strip()
     stale_hedges = critic.recent_stance_words(log_for_rules)
     owe_feeling = feeling_quota and not critic.recent_feeling(log_for_rules)
+    # Once per topic, before any round: every round argues the same stance
+    # from the same facts, and the critic grades against them too.
+    ctx = (topic_context(voice, topic, author or "them", tenant=tenant, lanes=lanes)
+           if research and seed is None else {})
+    if edits_path is None and log_for_rules:
+        edits_path = Path(log_for_rules).parent / "edits.jsonl"
+    learned = learned_block(recent_edits(edits_path), author or "them")
+    if learned:
+        pal = (pal + "\n" + learned).strip()
 
     def regenerate(feedback):
         if feedback is None and seed is not None:
@@ -235,14 +408,15 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           owe_thinking=not critic.recent_public_thinking(log_for_rules),
                           banned_stance=stale_hedges, palette=pal,
                           require_feeling=require_feeling,
-                          owe_feeling=owe_feeling)
+                          owe_feeling=owe_feeling, context=ctx)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
                          generated_path=log_for_rules, max_chars=ceiling,
                          banned_motifs=cooling, palette=pal,
                          require_feeling=require_feeling,
-                         feeling_quota=feeling_quota,
+                         feeling_quota=feeling_quota, avoid_sentiment=avoid,
+                         brief_note=context_block(ctx),
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -265,6 +439,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
         "topic": topic, "register": register, "final": final,
         "verdict": verdict["verdict"], "scores": verdict.get("scores", {}),
         "rounds": rounds, "journey": journey, "generated_at": now_iso(),
+        "context": ctx or None,
+        "learned_from_edits": bool(learned),
         # Whose voice this was written in. Every other artefact carries it and
         # this one did not, so a row read back off disk could not be attributed
         # to anybody: fine while each person owns a Mac, wrong the moment two
@@ -320,7 +496,11 @@ def _print_result(r):
 # ------------------------------- CLI + tests ---------------------------------
 
 def selftest():
-    global draft_post
+    global draft_post, topic_context
+    # Never a real web search from a selftest: on a configured machine that
+    # would be a live, slow, billed call on every run.
+    _real_ctx = topic_context
+    topic_context = lambda *a, **k: {"facts": [], "stance": "test stance", "why": ""}
 
     p0 = build_draft_prompt("VOICE", "the topic", "banger")
     # The bar used to be the word "take", which the brief no longer uses: it
@@ -368,7 +548,8 @@ def selftest():
     def fake_dp(voice, topic, register, feedback=None, author=None,
                 allow_em_dash=False, tenant=None, max_chars=None,
                 banned_motifs=(), owe_thinking=False, banned_stance=(),
-                palette="", require_feeling=True, owe_feeling=False):
+                palette="", require_feeling=True, owe_feeling=False,
+                context=None):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -379,7 +560,7 @@ def selftest():
                    author=None, critiques_path=None, allow_em_dash=False,
                    tenant=None, max_chars=None, generated_path=None,
                    banned_motifs=None, palette="", require_feeling=True,
-                   feeling_quota=False):
+                   feeling_quota=False, avoid_sentiment=None, brief_note=""):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -411,6 +592,7 @@ def selftest():
     finally:
         draft_post = _real_dp
         critic.grade = _real_grade
+        topic_context = _real_ctx
 
     # The maker reads the same presence rule the critic enforces, per register.
     b = build_draft_prompt("v", "t", "banger")
@@ -419,6 +601,22 @@ def selftest():
     assert "SAY HOW IT LANDED" in b and "SAY HOW IT LANDED" not in a
     deadpan = build_draft_prompt("v", "t", "banger", require_feeling=False)
     assert "PUT YOURSELF IN THE POST" in deadpan and "SAY HOW IT LANDED" not in deadpan
+    withctx = build_draft_prompt("v", "t", "analytical", context={
+        "facts": [{"date": "2026-10-19", "fact": "Archer flew over SF Bay.", "source": "archer.com"}],
+        "stance": "Air taxis are a logistics story first."})
+    assert "STANCE TO TAKE: Air taxis are a logistics story first." in withctx
+    assert "2026-10-19: Archer flew over SF Bay." in withctx
+    assert "Take a clear stance" in build_draft_prompt("v", "t", "analytical")
+    import tempfile as _tf, json as _js
+    _e = Path(_tf.mkdtemp()) / "edits.jsonl"
+    _e.write_text("\n".join(_js.dumps(r) for r in (
+        {"kind": "revision_request", "request": "shorter, and less polite"},
+        {"kind": "posted_edit", "original": "long version", "posted": "short version"})))
+    lines = recent_edits(_e)
+    assert lines == ['- asked: "shorter, and less polite"',
+                     '- rewrote "long version" as "short version"'], lines
+    assert "LEARNED FROM KHOA'S OWN EDITS" in learned_block(lines, "Khoa")
+    assert recent_edits(None) == [] and learned_block([], "x") == ""
     owed = build_draft_prompt("v", "t", "analytical", owe_feeling=True)
     assert "CARRIED NO FEELING" in owed and "CARRIED NO FEELING" not in a
     assert "PUT YOURSELF IN THE POST" not in a

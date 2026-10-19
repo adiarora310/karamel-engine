@@ -130,6 +130,19 @@ DEFAULTS = {
     "feeling_quota": False,
     "cadence": "twice_daily",
     "drafts_per_run": None,
+    # With cadence "hourly": draft only every Nth hour of the posting window,
+    # counted from its start. 3 with an 08-23 window is 08, 11, 14, 17, 20.
+    # Khoa, 2026-10-19: every hour "looks like a bot, nobody is online that much".
+    "every_hours": 1,
+    # This person's own categories, for the subject line and the topic refill.
+    # Empty means the legacy four, which are Adi's and were labelling Khoa's
+    # drafts "Pop culture" and "Economy".
+    "lanes": [],
+    # Where posted-draft metrics come from (engagement.py). "links": only drafts
+    # whose post link came back in a reply. "browser": also read the account's
+    # public profile through the signed-in Chrome on this machine, to find posted
+    # drafts, reposts and follower counts. Never a password either way.
+    "engagement_source": "links",
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -186,6 +199,12 @@ class Tenant:
         self.cadence = cadence
         dpr = data.get("drafts_per_run")
         self.drafts_per_run = int(dpr) if dpr not in (None, "") else None
+        self.every_hours = max(1, int(data.get("every_hours") or 1))
+        self.lanes = [str(x).strip() for x in (data.get("lanes") or []) if str(x).strip()]
+        src = (data.get("engagement_source") or DEFAULTS["engagement_source"]).lower()
+        if src not in ("links", "browser"):
+            raise ValueError(f"tenant {data.get('id')!r} has engagement_source {src!r}")
+        self.engagement_source = src
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -284,9 +303,21 @@ class Tenant:
         Eastern time), so a tenant set to hourly is not emailed at 03:00."""
         local = local or datetime.now()
         if self.cadence == "hourly":
-            from karamel_common import in_posting_window
-            return in_posting_window(tenant=self)
+            from karamel_common import in_posting_window, now_et
+            et = now_et() if local is None or local.tzinfo is None else local
+            if not in_posting_window(et, tenant=self):
+                return False
+            start = int((self.posting_window or {}).get("start", 7))
+            return (et.hour - start) % self.every_hours == 0
         return local.hour in TWICE_DAILY_HOURS
+
+    def send_hours(self):
+        """The hours (their posting-window clock) a draft goes out, for display."""
+        if self.cadence != "hourly":
+            return list(TWICE_DAILY_HOURS)
+        w = self.posting_window or {"start": 7, "end": 21}
+        return [h for h in range(int(w["start"]), int(w["end"]))
+                if (h - int(w["start"])) % self.every_hours == 0]
 
     @property
     def is_legacy(self):
@@ -316,6 +347,12 @@ class Tenant:
     @property
     def generated_path(self):
         return self.data_dir / "generated.jsonl"
+
+    @property
+    def edits_path(self):
+        """What they asked to change and what they actually posted, one row per
+        reply. The learning signal from ongoing use (gen.recent_edits)."""
+        return self.data_dir / "edits.jsonl"
 
     @property
     def samples_path(self):
@@ -399,6 +436,8 @@ class Tenant:
             "require_feeling": self.require_feeling,
             "cadence": self.cadence, "drafts_per_run": self.drafts_per_run,
             "feeling_quota": self.feeling_quota,
+            "every_hours": self.every_hours, "lanes": self.lanes,
+            "engagement_source": self.engagement_source,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,
@@ -706,6 +745,11 @@ def selftest():
                      "posting_window": {"start": 8, "end": 23}})
     assert hourly.per_run == 1
     assert Tenant({"id": "z", "cadence": "hourly", "drafts_per_run": 2}).per_run == 2
+    every3 = Tenant({"id": "z", "cadence": "hourly", "every_hours": 3,
+                     "posting_window": {"start": 8, "end": 23}})
+    assert every3.send_hours() == [8, 11, 14, 17, 20], every3.send_hours()
+    assert hourly.send_hours() == list(range(8, 23))
+    assert Tenant({"id": "z", "lanes": ["VC", " ", "Deep tech"]}).lanes == ["VC", "Deep tech"]
     try:
         Tenant({"id": "z", "cadence": "every-minute"})
         raise AssertionError("an unknown cadence must fail at load")

@@ -238,7 +238,7 @@ class _CliUsage:
     cache_read_input_tokens = 0
 
 
-def _complete_cli(prompt, system, cfg, tenant, label):
+def _complete_cli(prompt, system, cfg, tenant, label, tools=None):
     """One `claude -p` call on this machine's subscription.
 
     The system block is folded into the prompt. The CLI has no cache_control, so
@@ -252,9 +252,14 @@ def _complete_cli(prompt, system, cfg, tenant, label):
     # the parent's session rather than as a fresh headless call.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
     try:
+        argv = [claude_bin(cfg), "-p", full]
+        if tools:
+            # Headless -p denies any tool that would ask permission, so the
+            # ones a call needs are named here and nothing else is allowed.
+            argv += ["--allowedTools", ",".join(tools)]
         r = subprocess.run(
-            [claude_bin(cfg), "-p", full], capture_output=True, text=True,
-            timeout=CLI_TIMEOUT, cwd="/tmp", env=env,
+            argv, capture_output=True, text=True,
+            timeout=CLI_TIMEOUT * (3 if tools else 1), cwd="/tmp", env=env,
         )
     except subprocess.TimeoutExpired as e:
         raise LLMError(f"claude -p timed out after {CLI_TIMEOUT}s") from e
@@ -383,8 +388,16 @@ def spend_today(tenant, date=None):
     return calls, usd
 
 
+# The engine-level names a caller asks for, mapped per provider. Only web
+# search is offered: drafting needs today's context, nothing else.
+WEB_TOOLS = ("WebSearch", "WebFetch")
+API_WEB_SEARCH = {"type": "web_search_20260209", "name": "web_search", "max_uses": 5}
+API_WEB_SEARCH_BASIC = {"type": "web_search_20250305", "name": "web_search", "max_uses": 5}
+MAX_PAUSE_CONTINUATIONS = 5
+
+
 def complete(prompt, system=None, tenant=None, label="", cfg=None,
-             max_tokens=None, effort=None):
+             max_tokens=None, effort=None, tools=None):
     """One completion. Returns the text.
 
     `system` is the stable part (a voice card) and is cached; `prompt` is the
@@ -400,7 +413,7 @@ def complete(prompt, system=None, tenant=None, label="", cfg=None,
     if cfg.get("provider") == "cli":
         # effort and max_tokens have no equivalent on the CLI. Ignored rather
         # than faked, so nobody tunes a dial that is not connected to anything.
-        return _complete_cli(prompt, system, cfg, tenant, label)
+        return _complete_cli(prompt, system, cfg, tenant, label, tools=tools)
     client = _client(cfg)
     model = cfg["model"]
     prof = profile_for(label, cfg)
@@ -428,9 +441,32 @@ def complete(prompt, system=None, tenant=None, label="", cfg=None,
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }]
 
+    if tools and "WebSearch" in tools:
+        kwargs["tools"] = [API_WEB_SEARCH]
+
     try:
         import anthropic
-        resp = client.beta.messages.create(**kwargs)
+        try:
+            resp = client.beta.messages.create(**kwargs)
+        except anthropic.BadRequestError as e:
+            # The dynamic-filtering variant needs Opus/Sonnet 4.6 or later; an
+            # older configured model gets the basic one rather than no search.
+            if "tools" in kwargs and "web_search" in str(e):
+                kwargs["tools"] = [API_WEB_SEARCH_BASIC]
+                resp = client.beta.messages.create(**kwargs)
+            else:
+                raise
+        # A server-side tool loop that hits its iteration limit pauses rather
+        # than finishing. Send the turn back as is and it resumes; no extra
+        # "continue" message, which the API would read as a new request.
+        n = 0
+        while resp.stop_reason == "pause_turn" and n < MAX_PAUSE_CONTINUATIONS:
+            n += 1
+            kwargs["messages"] = [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": resp.content},
+            ]
+            resp = client.beta.messages.create(**kwargs)
     except anthropic.NotFoundError as e:
         raise LLMError(f"model {model!r} not found: {e}") from e
     except anthropic.AuthenticationError as e:

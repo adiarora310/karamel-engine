@@ -156,8 +156,12 @@ def refill_topics(tenant, voice, seeds=(), want=REFILL_COUNT):
     prompt = (
         f"Here is a writer's voice card, between markers.\n\n"
         f"=== VOICE CARD START ===\n{voice}\n=== VOICE CARD END ===\n\n"
-        f"Propose {want} subjects this person would write about on X. Their "
-        f"lanes, their obsessions, the arguments they are already having.\n\n"
+        f"Use web search to see what has happened in the last week in their "
+        f"lanes ({', '.join(lanes_for(tenant))}). Propose {want} subjects this "
+        f"person would write about on X THIS WEEK: a real, current event or claim "
+        f"each, seen through their lanes, their obsessions and the arguments they "
+        f"are already having. Each subject names the event and the position they "
+        f"would take on it, not just a theme.\n\n"
         f"Do NOT propose any of these, or anything that restates one:\n"
         f"{avoid_block}\n\n"
         f"Return exactly {want} lines, nothing else, each formatted:\n"
@@ -167,7 +171,8 @@ def refill_topics(tenant, voice, seeds=(), want=REFILL_COUNT):
         f"claim about AI they would defend."
     )
     try:
-        out = llm.complete(prompt, label="topic-refill", tenant=tenant.id)
+        out = llm.complete(prompt, label="topic-refill", tenant=tenant.id,
+                           tools=llm.WEB_TOOLS)
     except Exception as e:
         print(f"[{tenant.id}] topic refill failed: {e}", file=sys.stderr)
         return 0
@@ -185,6 +190,27 @@ def refill_topics(tenant, voice, seeds=(), want=REFILL_COUNT):
 # already matches against as LANE_FIT. Used in the subject so the inbox says
 # what a draft is about before it is opened.
 LANES = ("Pop culture", "Economy", "Investing", "Entrepreneurship")
+
+
+def lanes_for(tenant):
+    """This person's categories, or the legacy four (Adi's) when unset."""
+    return list(getattr(tenant, "lanes", None) or LANES)
+
+
+PLATFORM = "X"
+
+
+def subject_for(kind, lane):
+    """The platform first, so an inbox that also receives LinkedIn drafts can
+    tell them apart at a glance. Khoa, 2026-10-19: keep X and LinkedIn drafts
+    clearly separate.
+
+    **"[Karamel]" must stay in it.** inbox.search_uids fetches only mail whose
+    subject carries inbox.SUBJECT_MARKER, which is both how replies are found
+    and the boundary that keeps the reader out of unrelated mail. A subject
+    without it drops every Posted, Skip and edit reply with no error."""
+    import inbox
+    return f"[{PLATFORM}] {inbox.SUBJECT_MARKER} {kind}: {lane}"
 
 
 def sentence_case(s):
@@ -206,22 +232,24 @@ def classify_lane(topic, text, tenant=None):
     unexpected returns the first lane rather than raising."""
     import llm
 
+    lanes = lanes_for(tenant)
+
     prompt = (
         "Classify this post into exactly one lane. Reply with the lane name "
         "and nothing else.\n\nLanes:\n"
-        + "\n".join(f"- {l}" for l in LANES)
+        + "\n".join(f"- {l}" for l in lanes)
         + f"\n\nTopic: {topic}\n\nPost:\n{text}\n"
     )
     try:
         out = (llm.complete(prompt, label="lane", tenant=(tenant.id if tenant else None))
                or "").strip()
     except Exception:
-        return LANES[0]
+        return lanes[0]
     low = out.lower()
-    for lane in LANES:
+    for lane in lanes:
         if lane.lower() in low:
             return lane
-    return LANES[0]
+    return lanes[0]
 
 
 def format_draft(register, topic, text, scores, when, draft_id=None):
@@ -265,10 +293,16 @@ def format_draft(register, topic, text, scores, when, draft_id=None):
     # rejects it.
     open_line = f"Click on the link to post it: {post_url(text)}\n\n"
 
-    tail = ("Reply to this email with one word or emoji:\n"
-            "Posted or ✅: You published it as written.\n"
-            "Skip or ❌: You binned it.\n"
-            "Edited or ✏️: Followed by what you actually posted.")
+    # Khoa, 2026-10-19: let the person edit by replying, and send back a
+    # revised version. A free-text reply is now a change request
+    # (inbox.classify_reply); only a short Posted or Skip is a status.
+    tail = ("Reply to this email:\n"
+            "Want changes? Just say what to change (\"shorter\", \"more skeptical "
+            "of Tesla\", or paste your own version) and a revised draft comes back "
+            "in this thread.\n"
+            "Posted or ✅: you published it. Paste the post's link too, so "
+            "Karamel can track how it does.\n"
+            "Skip or ❌: you binned it.")
 
     # The id moved out of the subject and lives here. inbox.py reads it from
     # the RAW body of a reply, before the quoted original is stripped, so it
@@ -335,6 +369,8 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             samples_path=tenant.samples_path,
             require_feeling=tenant.require_feeling,
             feeling_quota=tenant.feeling_quota,
+            lanes=lanes_for(tenant),
+            edits_path=tenant.edits_path,
             log=True,
         )
         if r["verdict"] != "PASS":
@@ -371,7 +407,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
         # The lane, not the topic. A subject line is read in a list, where the
         # useful thing is what this is about, and the whole topic never fits.
         lane = classify_lane(t["topic"], r["final"], tenant)
-        subject = f"[Karamel] Your draft is ready to post! {lane}"
+        subject = subject_for("Draft ready to post", lane)
         mid = channels.send(tenant, msg, dry=dry, subject=subject)
         delivered += 1
         if dry:
@@ -394,9 +430,18 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             # match on it, keep working. It is a channel message id now, not
             # necessarily Telegram's.
             "telegram_msg_id": mid,
+            "lane": lane,
             "drafted_at": now_iso(),
         })
     print(f"[{tenant.id}] done: {delivered} draft(s) delivered")
+    # After delivery, never before: a slow browser read must not hold up a
+    # draft, and a failure here is a log line, not a failed run.
+    if not dry:
+        try:
+            import engagement
+            print(engagement.run_tenant(tenant))
+        except Exception as e:
+            print(f"[{tenant.id}] engagement tracking skipped: {e}", file=sys.stderr)
     return delivered
 
 
@@ -424,6 +469,10 @@ def run(tenant_ids, limit=None, force=False, dry=False):
 
 
 def selftest():
+    # The platform label and the reply marker, both, or replies are dropped.
+    import inbox as _inbox
+    _subj = subject_for("Draft ready to post", "Deep tech")
+    assert _subj.startswith("[X] ") and _inbox.SUBJECT_MARKER in _subj, _subj
     global read_jsonl
     import pathlib
     from datetime import datetime
@@ -523,8 +572,9 @@ def selftest():
     # Both spellings offered. The word is the easier ask on a phone, where an
     # emoji picker is a worse prompt than typing five letters, and the parser
     # has always accepted either.
-    assert "Posted" in m and "Skip" in m and "Edited" in m, m
-    assert "✅" in m and "❌" in m and "✏️" in m, m
+    assert "Posted" in m and "Skip" in m and "revised draft comes back" in m, m
+    # The pencil is gone: an edit is now said in words, and comes back revised.
+    assert "✅" in m and "❌" in m and "✏️" not in m, m
     assert "NOT READY" not in m, "a clean draft must not carry the warning"
 
     # Sentence case, not title case: topics are written as sentences and carry
@@ -563,9 +613,9 @@ def selftest():
         "the draft comes before the button, so it is read before it is posted"
 
     # Word or emoji, joined by "or" and separated from the meaning by a colon.
-    for line in ("Posted or ✅: You published it as written.",
-                 "Skip or ❌: You binned it.",
-                 "Edited or ✏️: Followed by what you actually posted."):
+    for line in ("Posted or ✅: you published it.",
+                 "Skip or ❌: you binned it.",
+                 "Want changes? Just say what to change"):
         assert line in m, (line, m)
     assert "Click on the link to post it:" in m, m
 

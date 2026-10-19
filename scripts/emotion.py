@@ -276,6 +276,51 @@ def _palette_line(path_str, mtime, author):
     return describe(palette(read_samples(path_str)), author)
 
 
+@functools.lru_cache(maxsize=16)
+def _palette_dict(path_str, mtime):
+    return palette(read_samples(path_str))
+
+
+def palette_for(samples_path):
+    """The palette dict for a samples file, cached until it changes."""
+    p = Path(samples_path) if samples_path else None
+    if not p or not p.is_file():
+        return None
+    return _palette_dict(str(p), p.stat().st_mtime)
+
+
+DRIFT_WINDOW = 3
+DRIFT_HITS = 2
+RARE_SHARE = 0.25
+
+
+def lead_group(text):
+    """The sentiment group a text leads with, or None if it carries no feeling."""
+    s = score(text)
+    if s is None or s["neutral"] >= CARRIES_FEELING_NEUTRAL:
+        return None
+    return sentiment_of(top(s)[0])
+
+
+def drift_avoid(recent_texts, pal, window=DRIFT_WINDOW, hits=DRIFT_HITS,
+                rare=RARE_SHARE):
+    """The sentiment group the next draft must not lead with, or None.
+
+    Tuning after the 2026-10-18 audit: Adi's drafts led positive 47% of the
+    time against 22% of his own writing. A group that is rare for this person
+    (at most `rare` of their palette) and has led `hits` of the last `window`
+    shipped drafts is drift, and the next draft is steered off it. Per person:
+    for Adi that is "positive"; for Khoa, whose writing is 88% positive, it is
+    "negative" or "ambiguous", and warmth is never penalised."""
+    if not pal or not available():
+        return None
+    leads = [g for g in (lead_group(t) for t in recent_texts[-window:]) if g]
+    for group, share in pal["groups"].items():
+        if share <= rare and leads.count(group) >= hits:
+            return group
+    return None
+
+
 def palette_line(samples_path, author="them"):
     """The palette sentence for a person, cached until their samples change.
     Empty when there is no samples file or no model."""
@@ -302,7 +347,14 @@ def selftest():
                      "groups": {"negative": 0.6, "ambiguous": 0.4, "positive": 0.0}},
                     "Adi")
     assert "annoyance, curiosity" in line and "approving" in line
+    assert drift_avoid(["a", "b"], None) is None
     if available():
+        adi_like = {"groups": {"negative": 0.56, "ambiguous": 0.22, "positive": 0.22}}
+        warm = ["Someone raised money to build a toilet that drives itself to you. "
+                "Whatever it is. I love it."] * 2
+        assert drift_avoid(warm, adi_like) == "positive"
+        khoa_like = {"groups": {"negative": 0.0, "ambiguous": 0.12, "positive": 0.88}}
+        assert drift_avoid(warm, khoa_like) is None, "warmth is Khoa's, never drift"
         receipt = score("Just paid $7 for a Crumbl cookie that will be gone "
                         "from the menu next week.")
         assert receipt["neutral"] > 0.6, receipt["neutral"]  # 0.71 / 0.89

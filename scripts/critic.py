@@ -171,7 +171,7 @@ def clean_axis(register):
 
 
 def build_critique_prompt(voice, draft, context=None, register="auto", author=None,
-                          palette=""):
+                          palette="", brief_note=""):
     """`author` is the name the grader is told it works for. It was the literal
     a single hardcoded name until the registry existed, which meant every tenant's
     drafts were graded against a stranger: the voice card would say one person
@@ -184,6 +184,13 @@ def build_critique_prompt(voice, draft, context=None, register="auto", author=No
     # VOICE, not a veto: seventeen posts is too few to refuse a draft on.
     pal_note = (f"\n{palette} A draft whose feeling is outside that range "
                 "scores lower on VOICE." if palette else "")
+    # Today's researched facts and the stance the maker was given. The facts
+    # are not fabrication; a draft that ignores the stance has no take.
+    if brief_note:
+        pal_note += ("\nThe maker was given this researched context and stance. "
+                     "Facts listed here are sourced, not invented. A draft that "
+                     "does not take this stance, or a sharper one, scores low on "
+                     f"TAKE:\n{brief_note}")
     return f"""You are the strictest editor {who} has. Your only job is to catch drafts that do not sound like them, or that fall flat, before they ever reach them. You did not write this draft. Be skeptical. Default to FAIL if it is generic, flat, or could have been written by anyone.
 
 Their voice card is in your system prompt. Grade against it.
@@ -200,8 +207,9 @@ STANDALONE is a yes/no, judged before the axes. A post is read cold by a strange
 
 Score each axis 1 to 10:
 - VOICE: matches the card's texture, register, openers, and rules.
-- TAKE: the writer is somewhere in the argument. A verdict is one way; so is a question they actually have, a disagreement with a view other people hold, a speculation ("I wonder if"), or a noticing that does not resolve. A draft that recounts true facts with no angle scores LOW. "This happened, then this happened" is a fail. So is the opposite failure, and it is the common one here: a closed three-beat ruling (fact, clever reframe, universal law) with nothing unresolved and nobody to disagree with. Measured against the writers this account is modelled on, 55% of their posts show the thinking rather than only the conclusion; do not reward a draft for sounding finished.
+- TAKE: a clear stance someone could disagree with, stated so a reader can say in one line what the writer thinks; a topic or an observation without a position scores LOW. The writer is somewhere in the argument. A verdict is one way; so is a question they actually have, a disagreement with a view other people hold, a speculation ("I wonder if"), or a noticing that does not resolve. A draft that recounts true facts with no angle scores LOW. "This happened, then this happened" is a fail. So is the opposite failure, and it is the common one here: a closed three-beat ruling (fact, clever reframe, universal law) with nothing unresolved and nobody to disagree with. Measured against the writers this account is modelled on, 55% of their posts show the thinking rather than only the conclusion; do not reward a draft for sounding finished.
 - SPECIFIC: contains at least one concrete number, name, or exact detail.
+- ONE POINT: a post makes one clear point. If the draft makes two separate points, or spends a sentence setting up before it gets to the point, dock TAKE and say which part to cut.
 
 CLEANLINESS IS NOT SCORED BY YOU. You report evidence and the score is computed from it. List every AI tell you find, and for each one QUOTE THE OFFENDING TEXT VERBATIM from the draft. A tell you cannot quote does not count and will be discarded, so do not report an impression. Quote the shortest span that contains the problem.
 The tells to look for:
@@ -888,7 +896,7 @@ def slop_hits(draft):
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
            must_think=False, banned_stance=(), require_feeling=True,
-           must_feel=False):
+           must_feel=False, avoid_sentiment=None):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -939,6 +947,17 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "nobody in the post: a banger is him reacting to something, so it "
             "needs I/my, the moment he met it, a question, or a reaction"
         )
+    if avoid_sentiment:
+        try:
+            import emotion
+            group = emotion.lead_group(draft)
+        except Exception:
+            group = None
+        if group == avoid_sentiment:
+            return "FAIL", (
+                f"drifting {avoid_sentiment}: recent drafts already leaned that "
+                "way and this person rarely does, so lean the way their palette does"
+            )
     if must_feel and not has_feeling(draft):
         return "FAIL", (
             "the last two posts carried no feeling and neither does this one: "
@@ -978,7 +997,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
           effort=None, generated_path=None, max_chars=None,
           banned_motifs=None, palette="", require_feeling=True,
-          feeling_quota=False):
+          feeling_quota=False, avoid_sentiment=None, brief_note=""):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -990,7 +1009,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
     try:
         out = call_claude(
             build_critique_prompt(voice, draft, context, register, author=author,
-                                  palette=palette),
+                                  palette=palette, brief_note=brief_note),
             system=voice, label="critic", tenant=tenant, effort=effort,
         )
     except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -1025,6 +1044,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         banned_stance=recent_stance_words(log_path_for_rules),
         require_feeling=require_feeling,
         must_feel=feeling_quota and not recent_feeling(log_path_for_rules),
+        avoid_sentiment=avoid_sentiment,
     )
     result = {
         "verdict": verdict,
