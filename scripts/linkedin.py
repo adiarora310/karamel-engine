@@ -244,6 +244,9 @@ class Lane:
         # one, so for them it counts as a feeling. Never both.
         self.exclamation_is_feeling = (bool(raw.get("exclamation_is_feeling"))
                                        and not self.no_exclamation)
+        # For a voice that uses one sparingly: allowed, and capped per post.
+        cap = raw.get("max_exclamations")
+        self.max_exclamations = int(cap) if cap not in (None, "") else None
         # A weekly send instead of every few hours: {"weekday": "sun", "hour": 9},
         # on the person's own clock. It bypasses the posting window, whose
         # default leaves Sunday open only from 16:00.
@@ -688,6 +691,10 @@ def feeling_veto(text, lane, cooled=()):
     """The lane's feeling rules, as one reason or ""."""
     if lane.no_exclamation and "!" in (text or ""):
         return "an exclamation mark, which is not in their register"
+    bangs = (text or "").count("!")
+    if lane.max_exclamations is not None and bangs > lane.max_exclamations:
+        return (f"{bangs} exclamation marks: they use {lane.max_exclamations} at most, "
+                "so keep the one that matters")
     if lane.require_feeling and not feels(text, lane):
         return ("no feeling: say how this landed for them, in the register the "
                 "voice card describes")
@@ -754,8 +761,10 @@ def sibling_veto(text, this_week):
 def feeling_note(lane, cooled):
     parts = []
     if lane.require_feeling:
+        cap = (f" At most {lane.max_exclamations} in a post." if lane.max_exclamations
+               is not None else "")
         marks = ("An emoji does not count; an exclamation mark does, where they "
-                 "would really use one." if lane.exclamation_is_feeling else
+                 f"would really use one.{cap}" if lane.exclamation_is_feeling else
                  "An exclamation mark or an emoji does not count.")
         parts.append("EVERY POST CARRIES A FEELING, and that is checked in code: how "
                      "this landed for them, in the register their voice card "
@@ -2069,6 +2078,14 @@ def selftest():
     assert wkd.due(datetime(2026, 10, 23, 9, 5, tzinfo=NYc)) and not wkd.due(
         datetime(2026, 10, 24, 9, 5, tzinfo=NYc)), "Friday yes, Saturday no"
     assert len(SOURCE_SETS["presence_confidence"]) == 7
+    one = Lane(tenants.Tenant({"id": "o", "linkedin": {
+        "enabled": True, "require_feeling": True, "exclamation_is_feeling": True,
+        "max_exclamations": 1}}))
+    assert feeling_veto("What a room. I was thrilled!", one) == ""
+    assert "2 exclamation marks" in feeling_veto("Thrilled! Truly!", one)
+    assert "At most 1 in a post" in feeling_note(one, ())
+    assert zone_hit("A new treatment for anxiety disorders", ["disorder"]) == "disorder"
+    assert zone_hit("Stage nerves before a big pitch", ["disorder", "diagnos"]) == ""
 
     # A lane can be prepared before there is anywhere to send it.
     with tempfile.TemporaryDirectory() as d:
