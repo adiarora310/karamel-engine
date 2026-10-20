@@ -319,6 +319,9 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
     if not tenant.enabled:
         print(f"[{tenant.id}] disabled, skipping")
         return 0
+    if not getattr(tenant, "x_drafts", True):
+        # LinkedIn-only: their drafts come from the LinkedIn lane, never here.
+        return 0
     if is_paused() and not force:
         print(f"[{tenant.id}] paused or halted, skipping")
         return 0
@@ -721,7 +724,7 @@ def main():
         if "--force" in sys.argv or "--now" in sys.argv:
             ids = [t.id for t in everyone]
         else:
-            ids = [t.id for t in everyone if t.due()]
+            ids = [t.id for t in everyone if t.x_drafts and t.due()]
             if not ids:
                 return 0
     else:

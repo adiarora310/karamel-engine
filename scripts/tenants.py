@@ -128,6 +128,9 @@ DEFAULTS = {
     # the next one must carry one. Khoa: 66% of his own writing carries a
     # feeling, his drafts with the hard rule off came out at 37%.
     "feeling_quota": False,
+    # False for a LinkedIn-only person (Brian Hanssen, 2026-10-20): the X
+    # heartbeat skips them entirely and only the LinkedIn lane drafts for them.
+    "x_drafts": True,
     "cadence": "twice_daily",
     "drafts_per_run": None,
     # With cadence "hourly": draft only every Nth hour of the posting window,
@@ -213,6 +216,7 @@ class Tenant:
         self.require_feeling = bool(data.get("require_feeling",
                                              DEFAULTS["require_feeling"]))
         self.feeling_quota = bool(data.get("feeling_quota", DEFAULTS["feeling_quota"]))
+        self.x_drafts = bool(data.get("x_drafts", True))
         cadence = (data.get("cadence") or DEFAULTS["cadence"]).lower()
         if cadence not in CADENCES:
             raise ValueError(f"tenant {data.get('id')!r} has cadence {cadence!r}; "
@@ -473,6 +477,7 @@ class Tenant:
             "cadence": self.cadence, "drafts_per_run": self.drafts_per_run,
             "feeling_quota": self.feeling_quota,
             "every_hours": self.every_hours, "lanes": self.lanes,
+            "x_drafts": self.x_drafts,
             "engagement_source": self.engagement_source,
             "presence_plural": self.presence_plural,
             "allowed_constructions": self.allowed_constructions,
@@ -778,6 +783,8 @@ def selftest():
 
     # Cadence: absent behaves as it always did; hourly is one draft an hour
     # inside their window.
+    assert Tenant({"id": "z"}).x_drafts is True
+    assert Tenant({"id": "z", "x_drafts": False}).x_drafts is False
     plain = Tenant({"id": "z", "originals_per_day": 3})
     assert plain.cadence == "twice_daily" and plain.per_run == 3
     assert plain.due(datetime(2026, 10, 19, 9, 0)) and plain.due(datetime(2026, 10, 19, 15, 2))
