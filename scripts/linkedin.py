@@ -74,6 +74,7 @@ CLI:
 """
 from __future__ import annotations
 
+import csv
 import email
 import html
 import imaplib
@@ -152,6 +153,19 @@ SOURCE_SETS = {
         ("LeadDev", "https://leaddev.com/rss.xml"),
         ("The Pragmatic Engineer", "https://newsletter.pragmaticengineer.com/feed"),
     ],
+    # Checked 2026-10-20 over a one-week window for items with a real summary:
+    # HBR's feed returned nothing, and Kellogg, McKinsey, Gallup and Stern's own
+    # news had no summarised item that week, so they are not here.
+    "management_comms": [
+        ("Fast Company Work Life", "https://www.fastcompany.com/work-life/rss"),
+        ("PR Daily", "https://www.prdaily.com/feed/"),
+        ("Ragan", "https://www.ragan.com/feed/"),
+        ("Poets & Quants", "https://poetsandquants.com/feed/"),
+        ("Knowledge at Wharton", "https://knowledge.wharton.upenn.edu/feed/"),
+        ("MIT Sloan Management Review", "https://sloanreview.mit.edu/feed/"),
+        ("Nielsen Norman Group", "https://www.nngroup.com/feed/rss/"),
+        ("Behavioral Scientist", "https://behavioralscientist.org/feed/"),
+    ],
     "founders_ai": [
         ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
         ("TechCrunch Startups", "https://techcrunch.com/category/startups/feed/"),
@@ -162,6 +176,8 @@ SOURCE_SETS = {
 }
 
 EM_DASH = re.compile(r"\s*[—–]\s*")
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 # --- the lane's config ---------------------------------------------------------
@@ -213,6 +229,36 @@ class Lane:
         self.feeling_words = [str(w).strip().lower() for w in (raw.get("feeling_words") or [])
                               if str(w).strip()]
         self.no_exclamation = bool(raw.get("no_exclamation"))
+        # The opposite case: a voice whose celebratory posts really do carry
+        # one, so for them it counts as a feeling. Never both.
+        self.exclamation_is_feeling = (bool(raw.get("exclamation_is_feeling"))
+                                       and not self.no_exclamation)
+        # A weekly send instead of every few hours: {"weekday": "sun", "hour": 9},
+        # on the person's own clock. It bypasses the posting window, whose
+        # default leaves Sunday open only from 16:00.
+        sched = raw.get("schedule") or None
+        if sched:
+            day = str(sched.get("weekday", "sun")).lower()[:3]
+            if day not in WEEKDAYS:
+                raise ValueError(f"tenant {tenant.id!r}: schedule.weekday {day!r}")
+            sched = {"weekday": day, "hour": int(sched.get("hour", 9))}
+        self.schedule = sched
+        # Every draft of a run in one email, numbered, instead of one each.
+        self.digest = bool(raw.get("digest"))
+        # {"amplify": 80, "own": 20}: crediting people from their roster versus
+        # their own take on the news, held as a ratio across runs.
+        mix = raw.get("mix") or None
+        self.mix = ({"amplify": int(mix.get("amplify", 0)), "own": int(mix.get("own", 0))}
+                    if mix else None)
+        self.roster_path = Path(raw["roster"]) if raw.get("roster") else (
+            Path(tenant.data_dir) / "roster.csv")
+        # Subjects to keep out of their feed, matched like the app's banned
+        # zones: a stem reaches its inflections ("politic" -> "politics").
+        self.banned_zones = [str(z).strip().lower() for z in (raw.get("banned_zones") or [])
+                             if str(z).strip()]
+        # A weekly reader can be offered anything from the past week.
+        self.max_age_h = int(raw.get("max_age_hours")
+                             or (24 * 7 if sched else ITEM_MAX_AGE_H))
         ch = getattr(tenant, "channel", None) or {}
         self.email = raw.get("email") or (ch.get("address") if ch.get("type") == "email" else "")
 
@@ -245,12 +291,17 @@ class Lane:
         a New York 08:00, the middle of his afternoon."""
         from karamel_common import in_posting_window
         here = (now or self.tenant.now()).astimezone(self.tenant.tz)
+        if self.schedule:
+            return (WEEKDAYS[here.weekday()] == self.schedule["weekday"]
+                    and here.hour == self.schedule["hour"])
         if not in_posting_window(here, tenant=self.tenant):
             return False
         start = int((getattr(self.tenant, "posting_window", None) or {}).get("start", 7))
         return (here.hour - start) % self.every_hours == 0
 
     def send_hours(self):
+        if self.schedule:
+            return [self.schedule["hour"]]
         w = getattr(self.tenant, "posting_window", None) or {"start": 7, "end": 21}
         s, e = int(w["start"]), int(w["end"])
         return [h for h in range(s, e) if (h - s) % self.every_hours == 0]
@@ -489,6 +540,86 @@ def linkedin_veto(draft):
     return ""
 
 
+# --- the roster: people to credit, in the account holder's own words --------------
+
+
+def load_roster(path):
+    """Rows that can be credited. A row is skipped, never completed, when it has
+    no full name, no known_for line or no public page for it: the line is a
+    claim about a real person in the account holder's name, and only they can
+    make it."""
+    p = Path(path)
+    if not p.is_file():
+        return []
+    out = []
+    with p.open(newline="", encoding="utf-8") as f:
+        for r in csv.DictReader(f):
+            name = " ".join((r.get("name") or "").split())
+            line = " ".join((r.get("known_for") or "").split())
+            url = (r.get("known_for_url") or "").strip()
+            if len(name.split()) < 2 or not line or not url.startswith(("http://", "https://")):
+                continue
+            out.append({"name": name, "known_for": line, "url": url,
+                        "relationship": " ".join((r.get("relationship") or "").split())})
+    return out
+
+
+def amplify_key(person):
+    """One person and one line. Rewriting the line offers them again;
+    re-reading an unchanged roster does not."""
+    return f"{person['name'].lower()}|{person['known_for'].lower()}"
+
+
+def roster_item(person, now):
+    return {"source": "your roster", "link": person["url"], "published": now,
+            "title": f"{person['name']}: {person['known_for']}",
+            "summary": (f"{person['name']}. How they know each other: "
+                        f"{person['relationship']}. Known for: {person['known_for']}."),
+            "person": person}
+
+
+def choose_to_credit(lane, roster, k):
+    """Up to k people not yet credited for their current line, longest since
+    last credited first, then in roster order."""
+    rows = read_jsonl(lane.drafts_path)
+    used = {r.get("amplify_key") for r in rows if r.get("amplify_key")}
+    last = {}
+    for r in rows:
+        if r.get("amplify_key"):
+            last[r["amplify_key"].split("|")[0]] = r.get("drafted_at", "")
+    waiting = [p for p in roster if amplify_key(p) not in used]
+    waiting.sort(key=lambda p: last.get(p["name"].lower(), ""))
+    return waiting[:k]
+
+
+def amplify_count(lane, n):
+    """How many of this run's n drafts credit somebody, so that the ratio
+    across every run so far stays as close to the mix as whole drafts allow.
+    Three a week at 80/20 goes 2, 3, 2, ... rather than 2 forever (67%)."""
+    if not lane.mix:
+        return 0
+    total = (lane.mix["amplify"] + lane.mix["own"]) or 1
+    target = lane.mix["amplify"] / total
+    rows = [r for r in read_jsonl(lane.drafts_path)
+            if r.get("kind") in ("amplify", "own") and not r.get("revised_from")]
+    a, t = sum(r["kind"] == "amplify" for r in rows), len(rows)
+    return min(range(n + 1), key=lambda k: (abs((a + k) / (t + n) - target), -k))
+
+
+def zone_hit(text, zones):
+    """The first banned subject present in the text, or "". A stem of five or
+    more letters reaches its inflections; a phrase is matched whole."""
+    words = re.sub(r"[^0-9a-z]+", " ", (text or "").lower()).split()
+    padded = " " + " ".join(words) + " "
+    for z in zones:
+        if " " in z:
+            if f" {z} " in padded:
+                return z
+        elif z in words or (len(z) >= 5 and any(w.startswith(z) for w in words)):
+            return z
+    return ""
+
+
 # --- feeling ------------------------------------------------------------------------
 
 #: Delivered drafts whose feelings are cooling. Every permission this engine has
@@ -521,6 +652,8 @@ def feels(text, lane):
     something, and for some voices they are exactly what must not appear."""
     if lane_feelings(text, lane):
         return True
+    if lane.exclamation_is_feeling and "!" in (text or ""):
+        return True
     try:
         return bool(critic._emotion_rescue(text))
     except Exception:
@@ -541,7 +674,7 @@ def feeling_veto(text, lane, cooled=()):
         return "an exclamation mark, which is not in their register"
     if lane.require_feeling and not feels(text, lane):
         return ("no feeling: say how this landed for them, in the register the "
-                "voice card describes. An exclamation mark or an emoji does not count")
+                "voice card describes")
     stems = {_stem(w) for w in cooled}
     again = sorted(w for w in lane_feelings(text, lane) if _stem(w) in stems)
     if again:
@@ -553,9 +686,12 @@ def feeling_veto(text, lane, cooled=()):
 def feeling_note(lane, cooled):
     parts = []
     if lane.require_feeling:
+        marks = ("An emoji does not count; an exclamation mark does, where they "
+                 "would really use one." if lane.exclamation_is_feeling else
+                 "An exclamation mark or an emoji does not count.")
         parts.append("EVERY POST CARRIES A FEELING, and that is checked in code: how "
                      "this landed for them, in the register their voice card "
-                     "describes. An exclamation mark or an emoji does not count.")
+                     f"describes. {marks}")
     if lane.feeling_words:
         parts.append("Their own words for it include: " + ", ".join(lane.feeling_words) + ".")
     if cooled:
@@ -630,8 +766,9 @@ def brief(author, item, stance, ceiling, people="", taught="", palette="",
     clean_rules, clean_note = critic.clean_axis("analytical", allowed)
     refused = "\n".join(f"- {l}" for l in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
                         if l not in allowed)
-    person = (f'{author} writes as "we": we, us and our, never "I". Keep it that '
-              "way in every sentence.\n" if presence_plural else "")
+    person = (f'"We" (we, us, our) is part of how {author} writes. Use "I" and "we" '
+              "exactly as the voice card says they do; never switch one for the "
+              "other on your own.\n" if presence_plural else "")
     aim_lo, aim_hi = max(120, ceiling - 400), max(200, ceiling - 150)
     dash = "" if allow_em_dash else "No em-dashes or en-dashes.\n"
     extra = ""
@@ -738,9 +875,82 @@ def palette_line(tenant, lane):
         return ""
 
 
+def amplify_brief(author, person, ceiling, taught="", palette="", cooling=(),
+                  stale_hedges=(), allow_em_dash=False, feedback=None,
+                  previous=None, instruction=None, presence_plural=False,
+                  allowed_constructions=(), feeling=""):
+    """The brief for a post crediting somebody. Its facts are the account
+    holder's own line about them and nothing the model remembers about a real
+    person, because a detail from memory is the one failure this genre cannot
+    be allowed."""
+    allowed = tuple(allowed_constructions or ())
+    clean_rules, clean_note = critic.clean_axis("analytical", allowed)
+    refused = "\n".join(f"- {l}" for l in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
+                        if l not in allowed)
+    dash = "" if allow_em_dash else "No em-dashes or en-dashes.\n"
+    we = (f'"We" (we, us, our) is part of how {author} writes. Use "I" and "we" exactly '
+          "as the voice card says they do.\n" if presence_plural else "")
+    extra = ""
+    if cooling:
+        extra += ("\nAlready used in recent posts, so refused here: "
+                  + ", ".join(sorted(cooling)[:12]) + ".\n")
+    if stale_hedges:
+        extra += ("\nAlready used as the hedge recently: "
+                  + ", ".join(f'"{w}"' for w in sorted(stale_hedges)) + ".\n")
+    for block in (palette, taught, feeling):
+        if block:
+            extra += f"\n{block}\n"
+    if previous is not None:
+        task = (f'REVISE this LinkedIn post. {author} replied with what to change:\n"{instruction}"'
+                f"\n\nThe post:\n{previous}\n\nMake exactly that change and keep every rule below.")
+    else:
+        task = f"Write ONE LinkedIn post in {author}'s voice that credits {person['name']}."
+    fb = (f"\nThe previous attempt was rejected. The single fix: {feedback}\n" if feedback else "")
+    return f"""{task} Their voice card is in your system prompt; obey it.
+
+WHO: {person['name']}.
+HOW {author.upper()} KNOWS THEM: {person['relationship'] or "a colleague"}
+WHAT THEY ARE KNOWN FOR, in {author}'s own words: {person['known_for']}
+
+These are the ONLY facts about {person['name']} you may state. Do not add a title, an award, a date, a number, a recent event or anything else from memory: the post goes out under {author}'s name about a real person, and one invented detail is worse than no post.
+
+The job: make people in {author}'s field want to look at {person['name']}'s work. Name them in full in the first two lines. Say the specific thing above and why it matters to the reader, from where {author} sits. Never "congratulations on the news" with nothing in it, never gushing, and never a turn back to {author}'s own work or anything for sale.
+
+WRITTEN FOR LINKEDIN: short paragraphs with a blank line between them, no bullet lists, no emoji bullets. The link to their work goes in the first comment, not the post. No hashtags, or at most two. End on the point or a real question for the reader. Never "Agree?" or a request to like or repost.
+
+{we}HUMAN, NOT GENERATED: say why {author} rates this work, in their register as the voice card shows it.
+
+DO NOT REUSE THEIR LINES. The voice card's quoted sentences are the bar, not material.
+
+LENGTH IS A HARD GATE: {ceiling} characters, counted. One point, made once.
+
+CLEAN is graded against this list:
+{clean_rules}
+{clean_note}
+{dash}
+Refused deterministically:
+{refused}
+{extra}{fb}
+Output ONLY the post text."""
+
+
+def amplify_context(person, ceiling):
+    return (f"This is a LinkedIn post, up to {ceiling} characters, crediting "
+            f"{person['name']}. The ONLY facts about them it may state: they are "
+            f"known for {person['known_for']}; the relationship is: "
+            f"{person['relationship']}. Any other claim about {person['name']} (a "
+            "title, award, date, number or recent event) is a fabrication: score "
+            "SPECIFIC 1 and quote it in WHY. Grade TAKE on whether the post says "
+            "specifically why this work matters to readers.")
+
+
 def write(tenant, lane, voice, item, stance, people="", previous=None,
           instruction=None, log=True):
-    """Draft, grade, refine. Returns the critic's result shape plus "final"."""
+    """Draft, grade, refine. Returns the critic's result shape plus "final".
+
+    An item carrying a "person" is a roster credit and gets that genre's brief
+    and context; anything else is a take on the news."""
+    person = item.get("person")
     author = tenant.name
     gen_log = lane.generated_path
     cooling = critic.topic_exempt(critic.recent_motifs(gen_log), item["title"])
@@ -755,17 +965,27 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
     journey = []
 
     def regenerate(feedback):
-        out = critic.call_claude(
-            brief(author, item, stance, lane.max_chars, people=people, taught=taught,
-                  palette=palette, cooling=cooling, stale_hedges=hedges,
-                  allow_em_dash=allow, feedback=feedback, previous=previous,
-                  instruction=instruction, presence_plural=plural,
-                  allowed_constructions=allowed, feeling=felt),
-            system=voice, tenant=tenant.id, label="li-maker").strip()
+        if person:
+            prompt = amplify_brief(author, person, lane.max_chars, taught=taught,
+                                   palette=palette, cooling=cooling, stale_hedges=hedges,
+                                   allow_em_dash=allow, feedback=feedback,
+                                   previous=previous, instruction=instruction,
+                                   presence_plural=plural, allowed_constructions=allowed,
+                                   feeling=felt)
+        else:
+            prompt = brief(author, item, stance, lane.max_chars, people=people, taught=taught,
+                           palette=palette, cooling=cooling, stale_hedges=hedges,
+                           allow_em_dash=allow, feedback=feedback, previous=previous,
+                           instruction=instruction, presence_plural=plural,
+                           allowed_constructions=allowed, feeling=felt)
+        out = critic.call_claude(prompt, system=voice, tenant=tenant.id,
+                                 label="li-maker").strip()
         return out if allow else EM_DASH.sub(", ", out).strip()
 
     def graded(d):
-        v = critic.grade(d, voice, context=critic_context(item, stance, lane.max_chars),
+        ctx = (amplify_context(person, lane.max_chars) if person
+               else critic_context(item, stance, lane.max_chars))
+        v = critic.grade(d, voice, context=ctx,
                          register="analytical", author=author,
                          critiques_path=lane.critiques_path, log=log,
                          allow_em_dash=allow, tenant=tenant.id,
@@ -891,6 +1111,127 @@ def _report_failures(tenant_id, failures):
             print(f"    round {j['round']}: {j['verdict']} {reason[:200]}")
 
 
+def news_items(lane, now, fetch=None):
+    """Fresh, unused, summarised items from the lane's sources, with anything
+    touching a banned subject removed before a model ever reads it."""
+    seen = {r.get("link") for r in read_jsonl(lane.seen_path)}
+    items = fresh(fetch_items(lane.sources, fetch=fetch), seen, now, lane.max_age_h)
+    if lane.banned_zones:
+        items = [it for it in items
+                 if not zone_hit(f"{it['title']} {it['summary']}", lane.banned_zones)]
+    return items
+
+
+def _row(tenant, draft_id, kind, item, stance, lane_name, why, r, mid, **extra):
+    row = {"draft_id": draft_id, "tenant": tenant.id, "platform": "linkedin",
+           "kind": kind, "topic": item["title"],
+           "item": {k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                    for k, v in item.items()},
+           "stance": stance, "lane": lane_name, "why": why,
+           "draft_text": r["final"], "scores": r["scores"], "rounds": r["rounds"],
+           "status": "pending", "message_id": mid, "drafted_at": now_iso()}
+    row.update(extra)
+    return row
+
+
+def digest_body(author, entries, short=0):
+    """One email, every draft numbered, each with its own id and composer link."""
+    n = len(entries)
+    credits = sum(e["kind"] == "amplify" for e in entries)
+    head = (f"Your LinkedIn drafts for this week, {author.split()[0]}: "
+            f"{credits} crediting people you know, {n - credits} of your own.")
+    parts = [head]
+    for e in entries:
+        item = e["item"]
+        if e["kind"] == "amplify":
+            source = f"Their work, for the first comment rather than the post:\n{item['link']}"
+        else:
+            source = (f"Source, for the first comment rather than the post:\n"
+                      f"{item['title']} ({item['source']})\n{item['link']}")
+        parts.append(
+            f"--- Draft {e['position']} of {n}: {e['lane_name']} ---\n\n"
+            f"{e['r']['final']}\n\n"
+            f"Why this one: {e['stance']}\n\n{source}\n\n"
+            f"Open it in LinkedIn, filled in (nothing posts until you press Post):\n"
+            f"{compose_url(e['r']['final'])}\n\n"
+            f"LinkedIn draft #L{e['draft_id']}")
+    tail = ("----\nReply with the draft's number first, one line each:\n"
+            "  2 posted, and the post's link once it is live\n"
+            "  1 skip\n"
+            "  3 shorter, and lead with the research\n"
+            "  2 edited: the version you actually posted\n"
+            "Each change comes back as its own revised draft.")
+    if short:
+        tail += (f"\n\nYour list had nothing new to credit for {short} of this week's "
+                 f"slot{'s' if short > 1 else ''}, so {'they are' if short > 1 else 'it is'} "
+                 "your own take instead. Add someone, or update what a person is known "
+                 "for, and they will be credited next week.")
+    parts.append(tail)
+    return "\n\n".join(parts) + "\n"
+
+
+def run_digest(tenant, lane, voice, dry=False, now=None, fetch=None):
+    """One run, every draft in one email: roster credits first, in the
+    proportion the mix asks for, then the person's own take on the news."""
+    now = now or datetime.now(timezone.utc)
+    n = lane.drafts_per_run
+    k = amplify_count(lane, n)
+    to_credit = choose_to_credit(lane, load_roster(lane.roster_path), k)
+    short = k - len(to_credit)
+    entries = []
+    for person in to_credit:
+        item = roster_item(person, now)
+        stance = (f"you know {person['name']} ({person['relationship'] or 'a colleague'}), "
+                  f"and their {person['known_for']} deserves a wider audience")
+        r = write(tenant, lane, voice, item, stance, log=not dry)
+        if r["verdict"] != "PASS":
+            _report_failures(tenant.id, [(item, stance, r)])
+            continue
+        entries.append({"kind": "amplify", "item": item, "stance": stance,
+                        "lane_name": f"Crediting {person['name']}", "why": "",
+                        "r": r, "key": amplify_key(person)})
+    want = n - len(entries)
+    if want > 0:
+        items = news_items(lane, now, fetch=fetch)
+        recent = [r.get("topic", "") for r in read_jsonl(lane.drafts_path)]
+        people = load_people(lane.people_path)
+
+        def mark_seen(item):
+            if not dry:
+                append_jsonl(lane.seen_path, {"link": item["link"], "ts": now_iso()})
+        for _ in range(want):
+            r, item, stance, lane_name, why, items, failures = draft_one(
+                tenant, lane, voice, items, recent, people, log=not dry, seen_cb=mark_seen)
+            _report_failures(tenant.id, failures)
+            if r is None:
+                break
+            entries.append({"kind": "own", "item": item, "stance": stance,
+                            "lane_name": f"Your take: {lane_name}", "why": why,
+                            "r": r, "key": None})
+            recent.append(item["title"])
+    if not entries:
+        print(f"[{tenant.id}] linkedin: digest empty this week, nothing sent")
+        return 0
+    base = int(time.time() * 1000)
+    for pos, e in enumerate(entries, 1):
+        e["position"], e["draft_id"] = pos, base + pos
+    text = digest_body(tenant.name, entries, short=short)
+    subj = (f"{SUBJECT_MARKER} Your {len(entries)} drafts for this week"
+            if len(entries) > 1 else f"{SUBJECT_MARKER} Your draft for this week")
+    if dry:
+        print(f"--- {subj}\n{text}")
+        return len(entries)
+    mid = send(lane, subj, text)
+    for e in entries:
+        append_jsonl(lane.drafts_path, _row(
+            tenant, e["draft_id"], e["kind"], e["item"], e["stance"], e["lane_name"],
+            e["why"], e["r"], mid, amplify_key=e["key"], digest=True,
+            digest_mid=mid, position=e["position"]))
+    print(f"[{tenant.id}] linkedin: digest of {len(entries)} delivered "
+          f"({sum(e['kind'] == 'amplify' for e in entries)} credits)")
+    return len(entries)
+
+
 def run_tenant(tenant, dry=False, now=None, fetch=None):
     lane = Lane(tenant)
     if not lane.enabled:
@@ -908,8 +1249,9 @@ def run_tenant(tenant, dry=False, now=None, fetch=None):
     voice = card.read_text()
     now = now or datetime.now(timezone.utc)
 
-    seen = {r.get("link") for r in read_jsonl(lane.seen_path)}
-    items = fresh(fetch_items(lane.sources, fetch=fetch), seen, now)
+    if lane.digest:
+        return run_digest(tenant, lane, voice, dry=dry, now=now, fetch=fetch)
+    items = news_items(lane, now, fetch=fetch)
     recent = [r.get("topic", "") for r in read_jsonl(lane.drafts_path)]
     people = load_people(lane.people_path)
 
@@ -934,14 +1276,8 @@ def run_tenant(tenant, dry=False, now=None, fetch=None):
             delivered += 1
             continue
         mid = send(lane, subj, text)
-        append_jsonl(lane.drafts_path, {
-            "draft_id": draft_id, "tenant": tenant.id, "platform": "linkedin",
-            "topic": item["title"], "item": {k: (v.isoformat() if hasattr(v, "isoformat") else v)
-                                             for k, v in item.items()},
-            "stance": stance, "lane": lane_name, "why": why,
-            "draft_text": r["final"], "scores": r["scores"], "rounds": r["rounds"],
-            "status": "pending", "message_id": mid, "drafted_at": now_iso(),
-        })
+        append_jsonl(lane.drafts_path, _row(tenant, draft_id, "own", item, stance,
+                                            lane_name, why, r, mid))
         recent.append(item["title"])
         delivered += 1
     print(f"[{tenant.id}] linkedin: {delivered} draft(s) delivered")
@@ -1012,16 +1348,77 @@ def apply_reply(tenant, msg, dry=False):
         return f"[{tenant.id}] linkedin: no matching draft"
     # A second reply to the first email is about the draft as it stands now,
     # not as it was first sent, so follow the revisions to the newest one.
-    newer = {r.get("revised_from"): j for j, r in enumerate(rows) if r.get("revised_from")}
-    while rows[i].get("draft_id") in newer:
-        i = newer[rows[i]["draft_id"]]
+    if not rows[i].get("digest"):
+        i = _newest(rows, i)
+    text = inbox.strip_quoted(raw)
+    reply_mid = inbox.header(msg, "Message-ID")
+    if rows[i].get("digest"):
+        return apply_digest_reply(tenant, lane, rows, rows[i]["digest_mid"], text,
+                                  reply_mid, dry=dry)
     draft = rows[i]
-    intent, payload = parse_reply(inbox.strip_quoted(raw))
+    intent, payload = parse_reply(text)
     if intent is None:
         return f"[{tenant.id}] linkedin: empty reply to #L{draft['draft_id']}"
     if dry:
         return f"[{tenant.id}] linkedin: would {intent} #L{draft['draft_id']}"
+    return _apply_one(tenant, lane, rows, i, intent, payload, reply_mid)
 
+
+_NUMBERED = re.compile(r"^\s*(?:draft\s*)?#?([1-9])\s*(?:[:.)\-]\s*|\s+)(.*)$", re.I)
+
+
+def parse_digest_reply(text):
+    """[(draft number, what they said about it)]. A line starting with a number
+    opens that draft's part; lines after it, until the next number, belong to
+    it, so an edited version can run over several lines."""
+    out = []
+    for line in (text or "").splitlines():
+        m = _NUMBERED.match(line)
+        if m:
+            out.append([int(m.group(1)), m.group(2)])
+        elif out and line.strip():
+            out[-1][1] += "\n" + line
+    return [(n, t.strip()) for n, t in out if t.strip()]
+
+
+def _newest(rows, i):
+    newer = {r.get("revised_from"): j for j, r in enumerate(rows) if r.get("revised_from")}
+    while rows[i].get("draft_id") in newer:
+        i = newer[rows[i]["draft_id"]]
+    return i
+
+
+def apply_digest_reply(tenant, lane, rows, digest_mid, text, reply_mid, dry=False):
+    by_pos = {r["position"]: j for j, r in enumerate(rows)
+              if r.get("digest_mid") == digest_mid and r.get("digest")}
+    parts = parse_digest_reply(text)
+    if not parts and len(by_pos) == 1:
+        parts = [(next(iter(by_pos)), text.strip())]
+    if not parts:
+        if not dry and text.strip():
+            send(lane, "Re: " + f"{SUBJECT_MARKER} Which draft?",
+                 "Start each line with the draft's number, for example \"2 shorter\" "
+                 "or \"1 skip\", so the change lands on the right one.",
+                 in_reply_to=reply_mid or digest_mid)
+        return f"[{tenant.id}] linkedin: digest reply with no draft number"
+    out = []
+    for pos, said in parts:
+        if pos not in by_pos:
+            out.append(f"no draft {pos} in that email")
+            continue
+        j = _newest(rows, by_pos[pos])
+        intent, payload = parse_reply(said)
+        if intent is None:
+            continue
+        if dry:
+            out.append(f"would {intent} draft {pos}")
+            continue
+        out.append(_apply_one(tenant, lane, rows, j, intent, payload, reply_mid))
+    return f"[{tenant.id}] linkedin: digest -> " + "; ".join(out)
+
+
+def _apply_one(tenant, lane, rows, i, intent, payload, reply_mid):
+    draft = rows[i]
     if intent == "skip":
         draft["status"] = "skipped"
     elif intent == "posted":
@@ -1037,7 +1434,7 @@ def apply_reply(tenant, msg, dry=False):
         draft["edited_text"] = payload
         record_edit(lane, draft, "edited", after=payload)
     else:
-        return revise(tenant, lane, rows, i, payload, inbox.header(msg, "Message-ID"))
+        return revise(tenant, lane, rows, i, payload, reply_mid)
     draft["replied_at"] = now_iso()
     write_jsonl_atomic(lane.drafts_path, rows)
     return f"[{tenant.id}] linkedin: #L{draft['draft_id']} -> {intent}"
@@ -1071,7 +1468,7 @@ def revise(tenant, lane, rows, i, instruction, reply_mid):
                body(tenant.name, new_id, r["final"], item, draft.get("stance", ""), revised=True),
                in_reply_to=reply_mid or draft.get("message_id"))
     rows.append(dict(draft, draft_id=new_id, draft_text=r["final"], status="pending",
-                     message_id=mid, revised_from=draft["draft_id"],
+                     message_id=mid, revised_from=draft["draft_id"], digest=False,
                      edited_text=None, revisions=[], drafted_at=now_iso()))
     write_jsonl_atomic(lane.drafts_path, rows)
     return f"[{tenant.id}] linkedin: #L{draft['draft_id']} revised -> #L{new_id}"
@@ -1244,7 +1641,10 @@ def status():
             continue
         drafts = read_jsonl(lane.drafts_path)
         posts = read_jsonl(lane.posts_path)
-        print(f"{t.id}: every {lane.every_hours}h at {lane.send_hours()} "
+        when = (f"weekly {lane.schedule['weekday']} {lane.schedule['hour']:02d}:00"
+                + (f", {lane.drafts_per_run} in one email" if lane.digest else "")
+                if lane.schedule else f"every {lane.every_hours}h at {lane.send_hours()}")
+        print(f"{t.id}: {when} "
               f"({len(lane.sources)} sources) -> {lane.email or 'NO EMAIL'}; "
               f"{len(drafts)} drafted, {len(posts)} posted, "
               f"{len(read_jsonl(lane.edits_path))} edits learned")
@@ -1522,9 +1922,17 @@ def selftest():
 
     we = brief("A Founder", items[0], "s", 700, presence_plural=True,
                allowed_constructions=["not-X-it's-Y contrast"])
-    assert 'writes as "we"' in we
+    assert '"We" (we, us, our) is part of how' in we and 'never "I"' not in we
     assert "- not-X-it's-Y contrast" not in we
-    assert 'writes as "we"' not in brief("A Founder", items[0], "s", 700)
+    assert '"We" (we, us, our)' not in brief("A Founder", items[0], "s", 700)
+    cheer = Lane(tenants.Tenant({"id": "ch", "linkedin": {
+        "enabled": True, "require_feeling": True, "exclamation_is_feeling": True}}))
+    assert feels("Huge week for the program!", cheer)
+    assert "an exclamation mark does" in feeling_note(cheer, ())
+    both = Lane(tenants.Tenant({"id": "b2", "linkedin": {
+        "no_exclamation": True, "exclamation_is_feeling": True}}))
+    assert not both.exclamation_is_feeling, "a refused mark can never also count"
+    assert len(SOURCE_SETS["management_comms"]) == 8
 
     # A lane can be prepared before there is anywhere to send it.
     with tempfile.TemporaryDirectory() as d:
@@ -1568,6 +1976,138 @@ def selftest():
             assert feeling_veto("A plain sentence.", off) == ""
         finally:
             type(t).data_dir = _orig_dd
+
+    # ---- the weekly digest ------------------------------------------------
+    from zoneinfo import ZoneInfo
+    NY = ZoneInfo("America/New_York")
+    wk = Lane(tenants.Tenant({"id": "wk", "linkedin": {
+        "enabled": True, "schedule": {"weekday": "sun", "hour": 9}, "digest": True,
+        "drafts_per_run": 3, "mix": {"amplify": 80, "own": 20}, "source_set": "founders_ai",
+        "banned_zones": ["politic", "white house"]}}))
+    assert wk.due(datetime(2026, 10, 25, 9, 30, tzinfo=NY)), "Sunday 09:30"
+    assert not wk.due(datetime(2026, 10, 25, 10, 0, tzinfo=NY)), "Sunday 10:00"
+    assert not wk.due(datetime(2026, 10, 26, 9, 0, tzinfo=NY)), "Monday 09:00"
+    assert wk.send_hours() == [9] and wk.max_age_h == 168
+    try:
+        Lane(tenants.Tenant({"id": "x", "linkedin": {"schedule": {"weekday": "someday"}}}))
+        raise AssertionError("an unknown weekday must fail at load")
+    except ValueError:
+        pass
+
+    assert zone_hit("A Political Turn at Work", ["politic"]) == "politic"
+    assert zone_hit("Briefing at the White House", ["white house"]) == "white house"
+    assert zone_hit("Housework and white space", ["white house"]) == ""
+    assert zone_hit("A new paper on feedback", ["politic"]) == ""
+
+    assert parse_digest_reply("1 skip\n3 shorter, and lead with the research") == [
+        (1, "skip"), (3, "shorter, and lead with the research")]
+    assert parse_digest_reply("2. posted https://www.linkedin.com/posts/x-activity-123-a") == [
+        (2, "posted https://www.linkedin.com/posts/x-activity-123-a")]
+    assert parse_digest_reply("2 edited: first line\nsecond line") == [
+        (2, "edited: first line\nsecond line")]
+    assert parse_digest_reply("Draft 3: skip") == [(3, "skip")]
+    assert parse_digest_reply("looks good to me") == []
+
+    with tempfile.TemporaryDirectory() as d:
+        roster = Path(d) / "roster.csv"
+        roster.write_text(
+            "name,kind,relationship,url,known_for,known_for_url,image_url\n"
+            "Ana Colleague,person,Department colleague,u,the course she built,https://x.test/a,\n"
+            "Ben Colleague,person,Former student,u,his book on feedback,https://x.test/b,\n"
+            "Cee Blank,person,Collaborator,u,,,\n"
+            "Prince,person,Friend,u,a line,https://x.test/p,\n"
+            "Dee Nolink,person,Friend,u,a line,not-a-url,\n")
+        assert [p["name"] for p in load_roster(roster)] == ["Ana Colleague", "Ben Colleague"]
+
+        card = Path(d) / "card.md"
+        card.write_text("card")
+        t = tenants.Tenant({"id": "dig-test", "name": "Ann Example", "voice_card": str(card),
+                            "channel": {"type": "email", "address": "b@example.com"},
+                            "linkedin": {"enabled": True, "digest": True, "drafts_per_run": 3,
+                                         "schedule": {"weekday": "sun", "hour": 9},
+                                         "mix": {"amplify": 80, "own": 20},
+                                         "source_set": "founders_ai", "roster": str(roster)}})
+        _orig_dd = type(t).data_dir
+        type(t).data_dir = property(lambda self: Path(d))
+        g = globals()
+        real = {k: g[k] for k in ("write", "send", "draft_one", "news_items")}
+        sent, n_own = [], [0]
+
+        def fake_write(tenant, lane, voice, item, stance, **k):
+            who = (item.get("person") or {}).get("name", "news")
+            text = (f"Revised for {who}." if k.get("previous") else f"A post about {who}.")
+            return {"final": text, "verdict": "PASS", "rounds": 0, "scores": {}, "journey": []}
+
+        def fake_draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None):
+            n_own[0] += 1
+            item = {"source": "Feed", "title": f"Story {n_own[0]}", "link": f"https://e.com/{n_own[0]}",
+                    "summary": "s" * 200, "published": datetime.now(timezone.utc)}
+            r = {"final": f"My own take {n_own[0]}.", "verdict": "PASS", "rounds": 0,
+                 "scores": {}, "journey": []}
+            return r, item, "a stance", "Founder craft", "why", items, []
+
+        g["write"], g["draft_one"] = fake_write, fake_draft_one
+        g["news_items"] = lambda lane, now, fetch=None: []
+        g["send"] = lambda lane, subj, text, in_reply_to=None: (
+            sent.append((subj, text, in_reply_to)) or f"<m{len(sent)}@k>")
+        try:
+            lane = Lane(t)
+            assert amplify_count(lane, 3) == 2
+            assert run_digest(t, lane, "card") == 3
+            assert len(sent) == 1, "three drafts, one email"
+            subj, body1, _ = sent[0]
+            assert subj == "[LinkedIn] Your 3 drafts for this week"
+            for must in ("Draft 1 of 3: Crediting Ana Colleague", "Draft 2 of 3: Crediting Ben Colleague",
+                         "Draft 3 of 3: Your take: Founder craft", "2 crediting people you know, 1 of your own",
+                         "Reply with the draft's number first", "https://x.test/a"):
+                assert must in body1, must
+            assert body1.count("LinkedIn draft #L") == 3
+            rows = read_jsonl(lane.drafts_path)
+            assert [r["kind"] for r in rows] == ["amplify", "amplify", "own"]
+            assert all(r["digest"] and r["digest_mid"] == "<m1@k>" for r in rows)
+            assert [r["position"] for r in rows] == [1, 2, 3]
+
+            # Week two: the ratio asks for three credits, the roster has none
+            # new, so all three are his own take and the email says why.
+            assert amplify_count(lane, 3) == 3
+            assert choose_to_credit(lane, load_roster(roster), 3) == []
+            run_digest(t, lane, "card")
+            assert "nothing new to credit for 3 of this week's slots" in sent[-1][1]
+            # Rewriting a line offers that person again.
+            roster.write_text(roster.read_text().replace("the course she built",
+                                                         "the new course she built"))
+            assert [p["name"] for p in choose_to_credit(lane, load_roster(roster), 3)] == ["Ana Colleague"]
+
+            # Replies by number, inside the first digest.
+            from email.message import EmailMessage
+            m = EmailMessage()
+            m["Subject"] = "Re: [LinkedIn] Your 3 drafts for this week"
+            m["From"] = "b@example.com"
+            m["In-Reply-To"] = "<m1@k>"
+            m["Message-ID"] = "<reply@client>"
+            m.set_content("1 skip\n3 shorter, and lead with the research\n\nOn Sun wrote:\n> " + body1[:80])
+            out = apply_reply(t, m)
+            assert "skip" in out and "revised" in out, out
+            rows = read_jsonl(lane.drafts_path)
+            assert rows[0]["status"] == "skipped"
+            third = [r for r in rows if r.get("position") == 3 and r.get("digest_mid") == "<m1@k>"]
+            assert third[0]["status"] == "revised"
+            new = [r for r in rows if r.get("revised_from") == third[0]["draft_id"]][0]
+            assert new["draft_text"] == "Revised for news." and new["digest"] is False
+            assert sent[-1][2] == "<reply@client>" and "Revised" in sent[-1][0]
+
+            # A reply that names no draft gets one question back, nothing changed.
+            m2 = EmailMessage()
+            m2["Subject"], m2["From"], m2["In-Reply-To"] = "Re: x", "b@example.com", "<m1@k>"
+            m2["Message-ID"] = "<reply2@client>"
+            m2.set_content("make them warmer")
+            before = read_jsonl(lane.drafts_path)
+            assert "no draft number" in apply_reply(t, m2)
+            assert read_jsonl(lane.drafts_path) == before
+            assert sent[-1][0].endswith("Which draft?")
+        finally:
+            type(t).data_dir = _orig_dd
+            g.update(real)
 
     # A halt stops the whole agent: no replies read, no drafts written.
     import karamel_common

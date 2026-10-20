@@ -247,8 +247,8 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "PUT YOURSELF IN THE POST, and this one is checked in code. A banger "
             f"is {who} reacting to something, not an encyclopedia entry about it. "
             "It is rejected unless it carries at least one of four shapes: first "
-            + ("person (this person writes as \"we\": we, us, our count, and "
-               "never switch them to \"I\")" if presence_plural else
+            + ("person (I or we: we, us, our count for this person; use "
+               "whichever their voice card says they use)" if presence_plural else
                "person (I, my, me)") +
             ", the moment they met the thing (what they read, "
             "watched, sat through, or found in their inbox), a question they are "
@@ -682,6 +682,7 @@ def selftest():
     we = build_draft_prompt("v", "t", "banger", presence_plural=True,
                             allowed_constructions=["not-X-it's-Y contrast"])
     assert "we, us, our count" in we and "(I, my, me)" not in we
+    assert "never switch" not in we, "presence_plural means 'we counts', not 'never I'"
     assert "- not-X-it's-Y contrast" not in we
     assert "- not-X-it's-Y contrast" in build_draft_prompt("v", "t", "banger")
     allfeel = build_draft_prompt("v", "t", "analytical", feeling_everywhere=True,
