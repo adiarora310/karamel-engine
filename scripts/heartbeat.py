@@ -376,6 +376,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             feeling_words=tenant.feeling_words,
             feeling_marks=tenant.feeling_marks,
             feeling_registers=tenant.feeling_registers or None,
+            thinking_words=tenant.thinking_words,
             log=True,
         )
         if r["verdict"] != "PASS":

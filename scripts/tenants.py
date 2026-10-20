@@ -161,6 +161,9 @@ DEFAULTS = {
     "feeling_words": [],
     "feeling_marks": True,
     "feeling_registers": [],
+    # Their own way of showing their working, for the thinking-in-public
+    # quota (Thomas: the conditional qualifier, "realistically", "not yet").
+    "thinking_words": [],
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -228,6 +231,7 @@ class Tenant:
         self.feeling_words = [str(x).strip().lower() for x in (data.get("feeling_words") or []) if str(x).strip()]
         self.feeling_marks = bool(data.get("feeling_marks", True))
         self.feeling_registers = [str(x) for x in (data.get("feeling_registers") or [])]
+        self.thinking_words = [str(x).strip().lower() for x in (data.get("thinking_words") or []) if str(x).strip()]
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -474,6 +478,7 @@ class Tenant:
             "allowed_constructions": self.allowed_constructions,
             "feeling_words": self.feeling_words, "feeling_marks": self.feeling_marks,
             "feeling_registers": self.feeling_registers,
+            "thinking_words": self.thinking_words,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,

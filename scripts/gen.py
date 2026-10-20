@@ -397,7 +397,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    max_chars=None, samples_path=None, require_feeling=True,
                    feeling_quota=False, lanes=(), research=True, edits_path=None,
                    presence_plural=False, allowed_constructions=(),
-                   feeling_words=(), feeling_marks=True, feeling_registers=None):
+                   feeling_words=(), feeling_marks=True, feeling_registers=None,
+                   thinking_words=()):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -452,7 +453,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
         return draft_post(voice, topic, register, feedback, author=author,
                           allow_em_dash=allow_em_dash, tenant=tenant,
                           max_chars=ceiling, banned_motifs=cooling,
-                          owe_thinking=not critic.recent_public_thinking(log_for_rules),
+                          owe_thinking=not critic.recent_public_thinking(
+                              log_for_rules, words=thinking_words),
                           banned_stance=stale_hedges, palette=pal,
                           require_feeling=require_feeling,
                           owe_feeling=owe_feeling, context=ctx,
@@ -472,6 +474,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                          allowed_constructions=allowed_constructions,
                          feeling_words=feeling_words, feeling_marks=feeling_marks,
                          feeling_registers=feeling_registers,
+                         thinking_words=thinking_words,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -618,7 +621,8 @@ def selftest():
                    banned_motifs=None, palette="", require_feeling=True,
                    feeling_quota=False, avoid_sentiment=None, brief_note="",
                    presence_plural=False, allowed_constructions=(),
-                   feeling_words=(), feeling_marks=True, feeling_registers=None):
+                   feeling_words=(), feeling_marks=True, feeling_registers=None,
+                   thinking_words=()):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -776,6 +780,7 @@ def main():
             feeling_words=tenant.feeling_words if tenant else (),
             feeling_marks=tenant.feeling_marks if tenant else True,
             feeling_registers=tenant.feeling_registers if tenant else None,
+            thinking_words=tenant.thinking_words if tenant else (),
             allow_em_dash=(tenant.allow_em_dash if tenant
                            else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:
