@@ -197,7 +197,8 @@ def context_block(ctx):
 def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
                        owe_thinking=False, banned_stance=(), palette="",
-                       require_feeling=True, owe_feeling=False, context=None):
+                       require_feeling=True, owe_feeling=False, context=None,
+                       presence_plural=False, allowed_constructions=()):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -205,7 +206,7 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     seen and CLEAN became the axis that failed every round. Both sides now read
     the same list from critic.clean_axis(), so they cannot drift apart."""
     who = author or tenants.default_author()
-    clean_rules, clean_note = critic.clean_axis(register)
+    clean_rules, clean_note = critic.clean_axis(register, allowed_constructions)
     dash_rule = ("" if allow_em_dash else
                  "No em-dashes or en-dashes. ")
     reg_note = REGISTER_NOTE.get(register, "Pick the register that fits per the voice card.")
@@ -225,6 +226,7 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                      if owe_thinking else "")
     refused = "\n".join(
         f"- {label}" for label in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
+        if label not in allowed_constructions
     )
     # Measured on their own timeline: every banger they write has a person in
     # it, and 2 of our 59 did. See critic.has_presence for the counts.
@@ -239,7 +241,10 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "PUT YOURSELF IN THE POST, and this one is checked in code. A banger "
             f"is {who} reacting to something, not an encyclopedia entry about it. "
             "It is rejected unless it carries at least one of four shapes: first "
-            "person (I, my, me), the moment they met the thing (what they read, "
+            + ("person (this person writes as \"we\": we, us, our count, and "
+               "never switch them to \"I\")" if presence_plural else
+               "person (I, my, me)") +
+            ", the moment they met the thing (what they read, "
             "watched, sat through, or found in their inbox), a question they are "
             "actually putting to the reader, or a reaction in the margin. Take the "
             "wording from THEIR bar examples in the voice card, never from another "
@@ -345,7 +350,7 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
                banned_motifs=(), owe_thinking=False, banned_stance=(),
                palette="", require_feeling=True, owe_feeling=False,
-               context=None):
+               context=None, presence_plural=False, allowed_constructions=()):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -357,7 +362,9 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            owe_thinking=owe_thinking,
                            banned_stance=banned_stance, palette=palette,
                            require_feeling=require_feeling,
-                           owe_feeling=owe_feeling, context=context),
+                           owe_feeling=owe_feeling, context=context,
+                           presence_plural=presence_plural,
+                           allowed_constructions=allowed_constructions),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -368,7 +375,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    log=False, author=None, generated_path=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
                    max_chars=None, samples_path=None, require_feeling=True,
-                   feeling_quota=False, lanes=(), research=True, edits_path=None):
+                   feeling_quota=False, lanes=(), research=True, edits_path=None,
+                   presence_plural=False, allowed_constructions=()):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -423,7 +431,9 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           owe_thinking=not critic.recent_public_thinking(log_for_rules),
                           banned_stance=stale_hedges, palette=pal,
                           require_feeling=require_feeling,
-                          owe_feeling=owe_feeling, context=ctx)
+                          owe_feeling=owe_feeling, context=ctx,
+                          presence_plural=presence_plural,
+                          allowed_constructions=allowed_constructions)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
@@ -432,6 +442,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                          require_feeling=require_feeling,
                          feeling_quota=feeling_quota, avoid_sentiment=avoid,
                          brief_note=context_block(ctx),
+                         presence_plural=presence_plural,
+                         allowed_constructions=allowed_constructions,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -564,7 +576,7 @@ def selftest():
                 allow_em_dash=False, tenant=None, max_chars=None,
                 banned_motifs=(), owe_thinking=False, banned_stance=(),
                 palette="", require_feeling=True, owe_feeling=False,
-                context=None):
+                context=None, presence_plural=False, allowed_constructions=()):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -575,7 +587,8 @@ def selftest():
                    author=None, critiques_path=None, allow_em_dash=False,
                    tenant=None, max_chars=None, generated_path=None,
                    banned_motifs=None, palette="", require_feeling=True,
-                   feeling_quota=False, avoid_sentiment=None, brief_note=""):
+                   feeling_quota=False, avoid_sentiment=None, brief_note="",
+                   presence_plural=False, allowed_constructions=()):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -632,6 +645,11 @@ def selftest():
                      '- rewrote "long version" as "short version"'], lines
     assert "LEARNED FROM KHOA'S OWN EDITS" in learned_block(lines, "Khoa")
     assert recent_edits(None) == [] and learned_block([], "x") == ""
+    we = build_draft_prompt("v", "t", "banger", presence_plural=True,
+                            allowed_constructions=["not-X-it's-Y contrast"])
+    assert "we, us, our count" in we and "(I, my, me)" not in we
+    assert "- not-X-it's-Y contrast" not in we
+    assert "- not-X-it's-Y contrast" in build_draft_prompt("v", "t", "banger")
     owed = build_draft_prompt("v", "t", "analytical", owe_feeling=True)
     assert "CARRIED NO FEELING" in owed and "CARRIED NO FEELING" not in a
     assert "PUT YOURSELF IN THE POST" not in a
@@ -717,6 +735,9 @@ def main():
             samples_path=tenant.samples_path if tenant else None,
             require_feeling=tenant.require_feeling if tenant else True,
             feeling_quota=tenant.feeling_quota if tenant else False,
+            presence_plural=tenant.presence_plural if tenant else False,
+            allowed_constructions=tenant.allowed_constructions if tenant else (),
+            lanes=tenant.lanes if tenant else (),
             allow_em_dash=(tenant.allow_em_dash if tenant
                            else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:

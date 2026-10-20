@@ -567,6 +567,37 @@ def critic_context(item, stance, ceiling):
             "SPECIFIC against the item's real details.")
 
 
+def approved_texts(tenant, lane):
+    """What this person actually approved, as they posted it: LinkedIn posts
+    they confirmed, then their approved X drafts.
+
+    Never their past writing. Adi, 2026-10-19: Karamel learns from ongoing
+    behaviour, not past activity, so a palette is built only from drafts the
+    person chose to publish. Both platforms count, because how somebody sounds
+    when pleased or unconvinced is theirs, not the platform's."""
+    texts = [r["text"] for r in read_jsonl(lane.posts_path) if r.get("text")]
+    try:
+        import emotion
+        texts += emotion.approved_texts(tenant.data_dir)
+    except Exception:
+        pass
+    return texts
+
+
+def palette_line(tenant, lane):
+    """Their emotional range for the brief, or "" until there are enough
+    approvals to measure one. The threshold is the X lane's, so both lanes
+    start describing a person at the same point."""
+    try:
+        import emotion
+        texts = approved_texts(tenant, lane)
+        if len(texts) < getattr(emotion, "PALETTE_MIN_APPROVED", 5):
+            return ""
+        return emotion.describe(emotion.palette(texts), tenant.name)
+    except Exception:
+        return ""
+
+
 def write(tenant, lane, voice, item, stance, people="", previous=None,
           instruction=None, log=True):
     """Draft, grade, refine. Returns the critic's result shape plus "final"."""
@@ -576,11 +607,7 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
     hedges = critic.recent_stance_words(gen_log)
     taught = lessons(lane.edits_path)
     allow = bool(getattr(tenant, "allow_em_dash", False))
-    try:
-        import emotion
-        palette = emotion.palette_line(tenant.samples_path, author)
-    except Exception:
-        palette = ""
+    palette = palette_line(tenant, lane)
     journey = []
 
     def regenerate(feedback):
@@ -1293,6 +1320,22 @@ def selftest():
         finally:
             del type(t).data_dir
             g["write"], g["send"] = real_write, real_send
+
+    # The palette is built from approvals only, never from past writing, and
+    # stays empty until there are enough of them.
+    with tempfile.TemporaryDirectory() as d:
+        t = tenants.Tenant({"id": "pal-test", "name": "A Founder",
+                            "linkedin": {"enabled": True, "source_set": "founders_ai"}})
+        type(t).data_dir = property(lambda self: Path(d))
+        try:
+            lane = Lane(t)
+            (Path(d) / "samples.jsonl").write_text('{"text": "old writing"}\n')
+            assert approved_texts(t, lane) == [], "past writing must never count"
+            append_jsonl(lane.posts_path, {"text": "A post they confirmed."})
+            assert approved_texts(t, lane) == ["A post they confirmed."]
+            assert palette_line(t, lane) == "", "one approval is not a palette"
+        finally:
+            del type(t).data_dir
 
     # A halt stops the whole agent: no replies read, no drafts written.
     import karamel_common

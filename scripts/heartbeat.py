@@ -371,6 +371,8 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             feeling_quota=tenant.feeling_quota,
             lanes=lanes_for(tenant),
             edits_path=tenant.edits_path,
+            presence_plural=tenant.presence_plural,
+            allowed_constructions=tenant.allowed_constructions,
             log=True,
         )
         if r["verdict"] != "PASS":

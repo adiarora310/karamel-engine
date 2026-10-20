@@ -143,6 +143,15 @@ DEFAULTS = {
     # public profile through the signed-in Chrome on this machine, to find posted
     # drafts, reposts and follower counts. Never a password either way.
     "engagement_source": "links",
+    # Per-person exceptions to rules that were measured on one person's
+    # writing. presence_plural: "we/us/our" counts as the author being in the
+    # post (Thomas writes in the plural throughout and never says "I"; all ten
+    # of his real lines failed the singular-only rule). allowed_constructions:
+    # SLOP_PATTERNS labels this person genuinely uses ("not-X-it's-Y
+    # contrast" is Thomas's core reframe), exempted from the deterministic
+    # refusal and from the critic's CLEAN list for them only.
+    "presence_plural": False,
+    "allowed_constructions": [],
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -205,6 +214,8 @@ class Tenant:
         if src not in ("links", "browser"):
             raise ValueError(f"tenant {data.get('id')!r} has engagement_source {src!r}")
         self.engagement_source = src
+        self.presence_plural = bool(data.get("presence_plural", False))
+        self.allowed_constructions = [str(x) for x in (data.get("allowed_constructions") or [])]
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -442,6 +453,8 @@ class Tenant:
             "feeling_quota": self.feeling_quota,
             "every_hours": self.every_hours, "lanes": self.lanes,
             "engagement_source": self.engagement_source,
+            "presence_plural": self.presence_plural,
+            "allowed_constructions": self.allowed_constructions,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,

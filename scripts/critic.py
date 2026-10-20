@@ -157,9 +157,12 @@ STOP_SLOP_LONGFORM_ONLY = [
 ]
 
 
-def clean_axis(register):
-    """The CLEAN-axis rule list and register note, grounded in stop-slop."""
-    checks = list(STOP_SLOP_UNIVERSAL)
+def clean_axis(register, allowed=()):
+    """The CLEAN-axis rule list and register note, grounded in stop-slop.
+    A rule whose construction this person is allowed is left off their list."""
+    keys = {"not-X-it's-Y contrast": "not-X-it's-Y"}
+    drop = [keys.get(a, a) for a in allowed]
+    checks = [c for c in STOP_SLOP_UNIVERSAL if not any(d in c for d in drop)]
     if register != "banger":
         checks += STOP_SLOP_LONGFORM_ONLY
     rules = "\n".join(f"    - {c}" for c in checks)
@@ -171,7 +174,7 @@ def clean_axis(register):
 
 
 def build_critique_prompt(voice, draft, context=None, register="auto", author=None,
-                          palette="", brief_note=""):
+                          palette="", brief_note="", allowed=()):
     """`author` is the name the grader is told it works for. It was the literal
     a single hardcoded name until the registry existed, which meant every tenant's
     drafts were graded against a stranger: the voice card would say one person
@@ -179,7 +182,7 @@ def build_critique_prompt(voice, draft, context=None, register="auto", author=No
     who = author or tenants.default_author()
     ctx = (f'It is a reply to this post:\n"""{context}"""'
            if context else "It is an original post (no reply context).")
-    clean_rules, clean_note = clean_axis(register)
+    clean_rules, clean_note = clean_axis(register, allowed)
     # The person's measured emotional range (emotion.palette_line). Guidance for
     # VOICE, not a veto: seventeen posts is too few to refuse a draft on.
     pal_note = (f"\n{palette} A draft whose feeling is outside that range "
@@ -471,7 +474,12 @@ STANCE = re.compile(
 PRESENCE_REGISTERS = frozenset({"banger"})
 
 
-def has_presence(draft):
+FIRST_PLURAL = re.compile(
+    r"\b(we|we" + APOS + r"re|we" + APOS + r"ve|we" + APOS + r"ll|us|our|ours)\b",
+    re.I)
+
+
+def has_presence(draft, plural=False):
     """Is the author anywhere in this post?
 
     Four shapes, all of them his own: he says I/my, he opens on the moment he
@@ -482,6 +490,7 @@ def has_presence(draft):
     text = (draft or "").strip()
     return bool(
         FIRST_PERSON.search(text)
+        or (plural and FIRST_PLURAL.search(text))
         or LIVED_ENTRY.match(text)
         or "?" in text
         or STANCE.search(text)
@@ -880,13 +889,16 @@ def recent_public_thinking(generated_path, lookback=PUBLIC_LOOKBACK):
         return True
     return any(thinks_in_public(t) for t in finals[-lookback:])
 
-def slop_hits(draft):
+def slop_hits(draft, allowed=()):
     """The refused constructions present in a draft, as (quote, label) pairs.
 
     Quoted like the model's tells are quoted, and for the same reason: a
-    rejection somebody cannot point at is a rejection they cannot act on."""
+    rejection somebody cannot point at is a rejection they cannot act on.
+    `allowed` holds labels this person genuinely uses (tenant setting)."""
     hits = []
     for pattern, label in SLOP_PATTERNS:
+        if label in allowed:
+            continue
         m = re.search(pattern, draft or "", re.MULTILINE)
         if m:
             hits.append((m.group(0).strip(), label))
@@ -896,7 +908,8 @@ def slop_hits(draft):
 def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
            must_think=False, banned_stance=(), require_feeling=True,
-           must_feel=False, avoid_sentiment=None):
+           must_feel=False, avoid_sentiment=None, presence_plural=False,
+           allowed_constructions=()):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -942,7 +955,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "closing emoji again: he signs off with one in about one post in "
             "four, and not twice running"
         )
-    if register in PRESENCE_REGISTERS and not has_presence(draft):
+    if register in PRESENCE_REGISTERS and not has_presence(draft, plural=presence_plural):
         return "FAIL", (
             "nobody in the post: a banger is him reacting to something, so it "
             "needs I/my, the moment he met it, a question, or a reaction"
@@ -968,7 +981,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "no feeling: he is in the post but never says how it landed. Name "
             "it (annoyed, suspicious, I love it, unfair, smh) or show it"
         )
-    hits = slop_hits(draft)
+    hits = slop_hits(draft, allowed=allowed_constructions)
     if hits:
         return "FAIL", "refused construction: " + "; ".join(
             f"{label} ({quote[:40]})" for quote, label in hits[:2]
@@ -997,7 +1010,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
           critiques_path=None, allow_em_dash=False, tenant=None,
           effort=None, generated_path=None, max_chars=None,
           banned_motifs=None, palette="", require_feeling=True,
-          feeling_quota=False, avoid_sentiment=None, brief_note=""):
+          feeling_quota=False, avoid_sentiment=None, brief_note="",
+          presence_plural=False, allowed_constructions=()):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -1009,7 +1023,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
     try:
         out = call_claude(
             build_critique_prompt(voice, draft, context, register, author=author,
-                                  palette=palette, brief_note=brief_note),
+                                  palette=palette, brief_note=brief_note,
+                                  allowed=allowed_constructions),
             system=voice, label="critic", tenant=tenant, effort=effort,
         )
     except (RuntimeError, subprocess.TimeoutExpired) as e:
@@ -1045,6 +1060,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         require_feeling=require_feeling,
         must_feel=feeling_quota and not recent_feeling(log_path_for_rules),
         avoid_sentiment=avoid_sentiment,
+        presence_plural=presence_plural,
+        allowed_constructions=allowed_constructions,
     )
     result = {
         "verdict": verdict,
@@ -1490,6 +1507,17 @@ def selftest():
         assert not reaction_words("Lenders took the recovery after the fraud case.")
         assert has_feeling("Paid $7 for a cookie and I'm weirdly proud of it.")
         assert not has_feeling(receipt)
+
+    # Per-person exceptions: Thomas writes "we", and "not X" is his reframe.
+    tl = "That makes us optimistic. Realistically."
+    assert not has_presence(tl) and has_presence(tl, plural=True)
+    assert decide(clean, tl, register="banger", require_feeling=False)[0] == "FAIL"
+    assert decide(clean, tl, register="banger", require_feeling=False,
+                  presence_plural=True)[0] == "PASS"
+    reframe = "It's not about the model, it's about the review loop we build."
+    assert slop_hits(reframe) and not slop_hits(reframe, allowed=["not-X-it's-Y contrast"])
+    assert "not-X-it's-Y" not in clean_axis("analytical", ["not-X-it's-Y contrast"])[0]
+    assert "not-X-it's-Y" in clean_axis("analytical")[0]
 
     # The Crumbl draft, which shipped because its subject was "That".
     assert slop_hits("Just paid $7 for a Crumbl cookie. That's not a bakery, "
