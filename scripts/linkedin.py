@@ -1144,7 +1144,7 @@ Reply to this email with:
   posted, and the post's link once it is live, so we can track how it does
   skip, to drop it
   edited: followed by the version you actually posted
-  or just say what to change ("shorter", "less formal", "lead with the robotics point") and a revised draft comes back
+  or just say what to change ("shorter", "warmer", "lead with the second point") and a revised draft comes back
 
 LinkedIn draft #L{draft_id}
 """
