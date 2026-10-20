@@ -290,8 +290,9 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
     ctx_text = context_block(context)
     ctx_note = (
         "\nCURRENT CONTEXT, researched today. The post states the stance below "
-        "in so many words, in their voice (their own hedge is fine: 'I think' "
-        "still leaves the position explicit), and uses one of these facts as "
+        "plainly, in their own words and voice, never copying the stance "
+        "sentence itself (their own hedge is fine: 'I think' still leaves the "
+        "position explicit), and uses one of these facts as "
         "the evidence, not all of them. Never leave the reader to infer the "
         f"stance from facts placed side by side: say it. A reader must be able "
         f"to say in one line what {who} thinks.\n"
