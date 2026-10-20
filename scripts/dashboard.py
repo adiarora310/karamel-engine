@@ -240,7 +240,10 @@ def gather(full=False):
         "card_ok": bool(t and t.voice_card_path.exists()),
         "running": bool(loaded),
         "agents": loaded,
-        "next_run": next_run(now),
+        # The person's own schedule, not the original 09:00/15:00: since the
+        # heartbeat went hourly-by-tenant the page said "Next draft 09:00" at
+        # 16:12 for someone due at 17:00.
+        "next_run": next_run(now, tuple(t.send_hours()) if t else (9, 15)),
         "drafts_total": len(drafts),
         "pending": pending[-5:],
         "answered": len(answered),
@@ -635,6 +638,8 @@ def selftest():
     assert next_run(datetime(2026, 8, 13, 9, 5)).hour == 15
     assert next_run(datetime(2026, 8, 13, 16, 0)).day == 14
     assert next_run(datetime(2026, 8, 13, 7, 0)).hour == 9
+    assert next_run(datetime(2026, 10, 20, 16, 12), (8, 11, 14, 17, 20)).hour == 17
+    assert next_run(datetime(2026, 10, 20, 21, 0), (8, 11, 14, 17, 20)).day == 21
 
     # The lock, and the refusal that matters more than the lock. Binding off
     # loopback without a token is the failure that puts one person's

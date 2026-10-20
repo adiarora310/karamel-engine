@@ -33,7 +33,10 @@ from shared import PROJECT, agent_labels, owner_id
 # holds state in memory across fires belongs here. Named by component, not by
 # label: the host runs these under the older com.cowork.* prefix, so a hardcoded
 # label meant the one agent that MUST be restarted never was.
-LONG_RUNNING = ("poller",)
+# The dashboard holds its code in memory too: it ran 3-day-old code on the host
+# until it was kickstarted by hand on 2026-10-20, showing a schedule that had
+# been replaced.
+LONG_RUNNING = ("poller", "dashboard")
 TIMEOUT = 120
 
 
