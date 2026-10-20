@@ -491,7 +491,7 @@ Items:
 
 Reply with JSON only:
 {{"index": <number, or null if none of these deserves a post from {author}>,
-  "stance": "<their position in one sentence, stated plainly: what they think, not what happened>",
+  "stance": "<their position in one sentence, in the shape their voice card says they argue in (a verdict, a question they actually have, or a reframe with its condition attached), and consistent with the item's own facts: what they think, not what happened>",
   "lane": "<one of: {' | '.join(lanes)}>",
   "why": "<why their audience would care, one short sentence>"}}"""
     out = critic.call_claude(prompt, system=voice, tenant=tenant_id, label="li-pick")
@@ -1414,6 +1414,13 @@ def selftest():
     finally:
         karamel_common.is_paused = real_paused
         g["run_inbox"], g["run_tenant"] = real_inbox, real_run
+
+    # The stance is asked for in the person's own shape. "Stated plainly"
+    # pushed every one toward a closed verdict, which is the shape that failed
+    # TAKE three rounds running on a card whose move is the conditional reframe.
+    import inspect
+    src = inspect.getsource(pick)
+    assert "stated plainly" not in src and "shape their voice card" in src
 
     print("linkedin selftest: ok")
     return 0
