@@ -419,6 +419,18 @@ def err_logs():
     return sorted(p for p in CONFIG_DIR.glob("*.err") if p.is_file())
 
 
+# Lines that are expected weather, not breakage: one feed in a list of
+# sources failing to load. The job logs it, skips that source and retries it
+# next run, so mailing someone "Oops" over it is a false alarm. Kept narrow on
+# purpose: a whole fetch failing (inbox, drafter) still alerts.
+BENIGN = re.compile(r"^\s*source failed: .+\(\w+\)\s*$")
+
+
+def benign(chunk):
+    """The chunk with expected-weather lines dropped."""
+    return "\n".join(l for l in chunk.splitlines() if not BENIGN.match(l)).strip()
+
+
 def new_stderr(state):
     """New bytes written to any .err since the last watch run.
 
@@ -435,8 +447,9 @@ def new_stderr(state):
             with open(p, "r", errors="replace") as f:
                 f.seek(prev)
                 chunk = f.read()
-            if chunk.strip():
-                found[p.name] = chunk.strip()
+            chunk = benign(chunk)
+            if chunk:
+                found[p.name] = chunk
         offsets[p.name] = size
     return found, offsets
 
@@ -728,7 +741,9 @@ def watch(dry=False):
         t = tenants.load_tenant(_owner())
         if t is None:
             raise RuntimeError(f"no tenant {_owner()!r}")
-        subject = "[Karamel] Oops, something doesn't look right..."
+        # The subject matches the body: "Oops" only when a check is failing.
+        subject = ("[Karamel] Oops, something doesn't look right..."
+                   if fresh_fail else "[Karamel] FYI: a new log line, nothing failing")
         channels.send(t, msg, dry=dry, subject=subject)
 
         # And to the operator directly, when one is configured. The email tells
@@ -846,6 +861,12 @@ def selftest():
     assert "If that does not fix it" not in logonly, logonly
     assert "Forward this to ops@example.com" in logonly, logonly
     assert "What the logs said" in logonly, logonly
+
+    # One news source timing out is weather, not breakage (the false "Oops"
+    # of 2026-10-20). Anything else in the same chunk still gets through.
+    assert benign("  source failed: MIT Technology Review (URLError)") == ""
+    assert benign("source failed: Axios (HTTPError)\nTraceback\nboom") == "Traceback\nboom"
+    assert benign("inbox run failed: gaierror: [Errno 8]") != ""
 
     # And a real failure keeps the imperative shape.
     real = build_alert([Check("agents", False, "d", "do this")], {},
