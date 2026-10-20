@@ -432,7 +432,7 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
     if avoid:
         pal = (pal + f" Their last drafts have leaned {avoid}, which is rare for "
                f"them: this one must not lead {avoid}. Checked in code.").strip()
-    stale_hedges = critic.recent_stance_words(log_for_rules)
+    stale_hedges = critic.recent_stance_words(log_for_rules, extra=feeling_words)
     owe_feeling = feeling_quota and not critic.recent_feeling(
         log_for_rules, words=feeling_words, marks=feeling_marks)
     feeling_everywhere = bool(require_feeling and feeling_registers

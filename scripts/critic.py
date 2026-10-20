@@ -841,17 +841,20 @@ STANCE_WORDS = (
 )
 
 
-def stance_words(draft):
+def stance_words(draft, extra=()):
     """Which uncertainty markers and feeling words a draft uses, lowercased.
 
     Feeling words share the hedges' budget for the same reason: anything newly
     required gets grabbed and repeated ("unfair" in every banger would be the
     🤌🏻 problem again)."""
     text = (draft or "").lower().replace("\u2019", "'")
-    return {w for w in STANCE_WORDS if w in text} | feelings(text)
+    own = {w for w in (extra or ()) if re.search(r"\b" + re.escape(w) + r"\b", text)}
+    # A person's own feeling words share the budget too (tenant feeling_words):
+    # Thomas's first two test drafts both closed on "that worries us".
+    return {w for w in STANCE_WORDS if w in text} | feelings(text) | own
 
 
-def recent_stance_words(generated_path, lookback=2):
+def recent_stance_words(generated_path, lookback=2, extra=()):
     """The hedges and feeling words the last couple of shipped drafts used.
 
     The maker reaches for one word and keeps it: the first batch after the
@@ -861,7 +864,7 @@ def recent_stance_words(generated_path, lookback=2):
     "maybe I've misunderstood", so the budget is per word, not per draft."""
     used = set()
     for t in shipped_finals(generated_path)[-lookback:]:
-        used |= stance_words(t)
+        used |= stance_words(t, extra)
     return frozenset(used)
 
 def thinks_in_public(draft, words=()):
@@ -955,7 +958,7 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
             "reference used in the last {} drafts: {}".format(
                 MOTIF_LOOKBACK, ", ".join(repeats[:3]))
         )
-    repeated = sorted(stance_words(draft) & set(banned_stance or ()))
+    repeated = sorted(stance_words(draft, feeling_words) & set(banned_stance or ()))
     if repeated:
         return "FAIL", (
             '"{}" again: the last posts already leaned on it, and a hedge that '
@@ -1077,7 +1080,7 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         emoji_cooling=recent_closing_emoji(log_path_for_rules),
         must_think=not recent_public_thinking(log_path_for_rules, words=thinking_words),
         thinking_words=thinking_words,
-        banned_stance=recent_stance_words(log_path_for_rules),
+        banned_stance=recent_stance_words(log_path_for_rules, extra=feeling_words),
         require_feeling=require_feeling,
         must_feel=feeling_quota and not recent_feeling(
             log_path_for_rules, words=feeling_words, marks=feeling_marks),
@@ -1468,6 +1471,12 @@ def selftest():
     assert {"taylor", "swift"} <= motifs("Taylor Swift bought the masters back.")
     assert "ring" in motifs("Ring shipped a doorbell."), "signatures always count"
     assert "michelin" in motifs("Michelin gave it a star.")
+
+    # Their own feeling words are rationed like the shared ones.
+    assert "worries" in stance_words("That worries us.", ["worries"])
+    assert decide(clean, "Review is our job now, and that worries us.",
+                  register="analytical", banned_stance={"worries"},
+                  feeling_words=["worries"])[0] == "FAIL"
 
     # Their own way of showing the working counts (Thomas's qualifier).
     assert not thinks_in_public("We sped up the writing. Fixable. Not yet fixed.")
