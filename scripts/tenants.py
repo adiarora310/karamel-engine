@@ -310,16 +310,21 @@ class Tenant:
 
         twice_daily keeps the original machine-local 09:00 and 15:00 so other
         installs do not change behaviour when the agent starts firing hourly.
-        hourly follows their posting window (karamel_common.in_posting_window,
-        Eastern time), so a tenant set to hourly is not emailed at 03:00."""
-        local = local or datetime.now()
+        hourly follows their posting window on THEIR clock (self.timezone), so
+        a tenant set to hourly is not emailed at 03:00 where they live.
+
+        It read Eastern time for everyone until 2026-10-20, which was right
+        for two New Yorkers and wrong the moment Thomas (Europe/Berlin) was
+        set up: his "08:00" would have arrived at 14:00 his time."""
         if self.cadence == "hourly":
-            from karamel_common import in_posting_window, now_et
-            et = now_et() if local is None or local.tzinfo is None else local
-            if not in_posting_window(et, tenant=self):
+            from karamel_common import in_posting_window
+            here = local if (local is not None and local.tzinfo is not None) else self.now()
+            here = here.astimezone(self.tz)
+            if not in_posting_window(here, tenant=self):
                 return False
             start = int((self.posting_window or {}).get("start", 7))
-            return (et.hour - start) % self.every_hours == 0
+            return (here.hour - start) % self.every_hours == 0
+        local = local or datetime.now()
         return local.hour in TWICE_DAILY_HOURS
 
     def send_hours(self):
@@ -766,6 +771,19 @@ def selftest():
                      "posting_window": {"start": 8, "end": 23}})
     assert every3.send_hours() == [8, 11, 14, 17, 20], every3.send_hours()
     assert hourly.send_hours() == list(range(8, 23))
+    # Their clock, not New York's.
+    berlin = Tenant({"id": "z", "cadence": "hourly", "every_hours": 3,
+                     "timezone": "Europe/Berlin",
+                     "posting_window": {"start": 8, "end": 23, "days": "all"}})
+    ny = ZoneInfo("America/New_York")
+    assert berlin.due(datetime(2026, 10, 21, 2, 0, tzinfo=ny))      # 08:00 Berlin
+    assert not berlin.due(datetime(2026, 10, 21, 9, 0, tzinfo=ny))  # 15:00 Berlin, not a send hour
+    assert berlin.due(datetime(2026, 10, 21, 8, 0, tzinfo=ZoneInfo("Europe/Berlin")))
+    nyc = Tenant({"id": "z", "cadence": "hourly", "every_hours": 3,
+                  "timezone": "America/New_York",
+                  "posting_window": {"start": 8, "end": 23, "days": "all"}})
+    assert nyc.due(datetime(2026, 10, 21, 8, 0, tzinfo=ny))
+    assert not nyc.due(datetime(2026, 10, 21, 2, 0, tzinfo=ny))
     assert Tenant({"id": "z", "lanes": ["VC", " ", "Deep tech"]}).lanes == ["VC", "Deep tech"]
     try:
         Tenant({"id": "z", "cadence": "every-minute"})
