@@ -106,6 +106,13 @@ DEFAULT_EVERY_HOURS = 3
 #: A news item older than this is history, not something to have a view on.
 ITEM_MAX_AGE_H = 72
 
+#: An item needs this much summary to be written about. Below it the maker has
+#: a headline and nothing else, and fills the gap: on 2026-10-20 a dry run for
+#: one pilot, given only a headline in which a co-founder called a protocol
+#: imperfect, wrote what his company "plans to support", which no text it was
+#: given says. A plausible invented detail in someone's own name.
+MIN_SUMMARY_CHARS = 120
+
 #: Rounds of critic feedback before a draft is dropped rather than sent.
 MAX_ROUNDS = 2
 
@@ -120,6 +127,13 @@ STATE = CONFIG_DIR / "linkedin_state.json"
 #: Public feeds, checked live on 2026-10-19: each served stories dated that day.
 #: Two candidates were dropped on the same check (Axios Pro, empty; VentureBeat's
 #: feed, last item 3 September). A tenant can name its own with "sources".
+#:
+#: Rechecked 2026-10-20 for something the first check missed: whether an item
+#: carries a summary at all. Sifted's 24 items were all headline-only, and
+#: Hacker News's "summary" is a link and a comment count, so both were removed;
+#: Ars Technica's AI feed was tested and left out for the same reason. GitHub's
+#: changelog was left out on purpose: a pilot's card forbids speaking for
+#: GitHub, and the picker would happily choose its product news.
 SOURCE_SETS = {
     "startups_vc_deeptech": [
         ("TechCrunch Venture", "https://techcrunch.com/category/venture/feed/"),
@@ -128,21 +142,20 @@ SOURCE_SETS = {
         ("The Robot Report", "https://www.therobotreport.com/feed/"),
         ("IEEE Spectrum Robotics", "https://spectrum.ieee.org/feeds/topic/robotics.rss"),
         ("MIT Technology Review", "https://www.technologyreview.com/feed/"),
-        ("Sifted", "https://sifted.eu/feed"),
     ],
     "devtools_ai": [
-        ("Hacker News Best", "https://hnrss.org/best"),
+        ("The New Stack", "https://thenewstack.io/feed/"),
+        ("InfoQ", "https://feed.infoq.com/"),
+        ("Simon Willison", "https://simonwillison.net/atom/everything/"),
         ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
         ("Stratechery", "https://stratechery.com/feed/"),
-        ("Sifted", "https://sifted.eu/feed"),
-        ("The Verge", "https://www.theverge.com/rss/index.xml"),
-        ("Crunchbase News", "https://news.crunchbase.com/feed/"),
+        ("LeadDev", "https://leaddev.com/rss.xml"),
+        ("The Pragmatic Engineer", "https://newsletter.pragmaticengineer.com/feed"),
     ],
     "founders_ai": [
         ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
         ("TechCrunch Startups", "https://techcrunch.com/category/startups/feed/"),
         ("Stratechery", "https://stratechery.com/feed/"),
-        ("Hacker News Best", "https://hnrss.org/best"),
         ("Crunchbase News", "https://news.crunchbase.com/feed/"),
         ("The Verge", "https://www.theverge.com/rss/index.xml"),
     ],
@@ -253,8 +266,19 @@ def lanes_with_linkedin():
 _TAG = re.compile(r"<[^>]+>")
 
 
+_FEED_BOILERPLATE = re.compile(
+    r"(Article URL|Comments URL):\s*\S+|Points:\s*\d+|#\s*Comments:\s*\d+", re.I)
+
+
 def _text(s):
     return " ".join(html.unescape(_TAG.sub(" ", s or "")).split())
+
+
+def _summary(s):
+    """The item's own words, with a feed's link-and-count boilerplate removed:
+    Hacker News's "summary" is nothing else, and it is long enough to pass for
+    a real one."""
+    return " ".join(_FEED_BOILERPLATE.sub(" ", _text(s)).split())
 
 
 def _local(tag):
@@ -301,8 +325,8 @@ def parse_feed(xml_text, source):
             "source": source,
             "title": title,
             "link": link,
-            "summary": _text(fields.get("description") or fields.get("summary")
-                             or fields.get("content"))[:900],
+            "summary": _summary(fields.get("description") or fields.get("summary")
+                                or fields.get("content"))[:900],
             "published": _when(fields.get("pubdate") or fields.get("published")
                                or fields.get("updated")),
         })
@@ -327,7 +351,7 @@ def fetch_items(sources, fetch=None):
 
 
 def fresh(items, seen_links, now, max_age_h=ITEM_MAX_AGE_H):
-    """Recent, undated-is-dropped, unused, one per link, newest first.
+    """Recent, undated-is-dropped, unused, summarised, one per link, newest first.
 
     Undated is dropped rather than trusted: "current" is the whole point, and an
     item that cannot say when it is from cannot promise it."""
@@ -337,6 +361,8 @@ def fresh(items, seen_links, now, max_age_h=ITEM_MAX_AGE_H):
         if not it["published"] or it["published"] < cutoff:
             continue
         if it["link"] in seen_links or it["link"] in links:
+            continue
+        if len(it.get("summary") or "") < MIN_SUMMARY_CHARS:
             continue
         links.add(it["link"])
         keep.append(it)
@@ -649,6 +675,8 @@ WRITTEN FOR LINKEDIN, NOT X:
 
 {person}HUMAN, NOT GENERATED: say how it landed for them, in their own words for liking, doubting, being surprised or unconvinced, the way the voice card shows they do. Contractions, one aside, their real hedges. Prose with no feeling in it is the main way these read as written by a machine.
 
+DO NOT REUSE THEIR LINES. The voice card quotes their real sentences as the bar, to show the texture. Lifting one, or lightly rewording one, reads as a pastiche of the person and is the most common way these fail. Write new sentences that could sit beside those, never the ones already there.
+
 Zero fabrication. State only facts that are in the item above, or that the voice card says they can claim. No invented numbers, quotes or dates. Where a fact you need is missing, leave it out.
 
 LENGTH IS A HARD GATE: {ceiling} characters, counted. Aim for {aim_lo} to {aim_hi}. One point, made once. No closing line that restates it.
@@ -664,12 +692,19 @@ Output ONLY the post text."""
 
 
 def critic_context(item, stance, ceiling):
+    """What the critic needs to grade a LinkedIn post, including the only text
+    its facts may come from. It used to get the headline alone, so a fact the
+    maker invented about the news could not be told from one it was given."""
     return (f"This is a LinkedIn post, not an X post: up to {ceiling} characters, "
             "short paragraphs are correct, and it is read by people in the "
-            f"writer's professional field. It responds to: {item['title']} "
-            f"({item['source']}). The position it should carry: {stance}. "
-            "Grade TAKE on whether that position is clear and theirs; grade "
-            "SPECIFIC against the item's real details.")
+            f"writer's professional field. The position it should carry: {stance}.\n"
+            f"The news it responds to, which is the ONLY text facts about the news "
+            f"may come from:\n{item['title']} ({item['source']})\n{item['summary']}\n"
+            "Grade TAKE on whether that position is clear and theirs. Grade SPECIFIC "
+            "against this text: any claim about the company, people or events in "
+            "the news that this text does not state is a fabrication, so score "
+            "SPECIFIC 1 and quote the claim in WHY. Claims the voice card says they "
+            "can make about themselves are allowed.")
 
 
 def approved_texts(tenant, lane):
@@ -1241,7 +1276,21 @@ def selftest():
     assert items[0]["summary"] == "Acme & friends, led by Jane Roe.", items[0]["summary"]
     assert parse_feed("<rss><not-closed>", "x") == []
     keep = fresh(items, {"https://example.com/q"}, now)
+    assert keep == [], "a 32-character summary is a headline, not something to write about"
+    long_items = [dict(i, summary=i["summary"] + " " + "x" * MIN_SUMMARY_CHARS) for i in items]
+    keep = fresh(long_items, {"https://example.com/q"}, now)
     assert [i["link"] for i in keep] == ["https://example.com/a"], keep
+    hn = parse_feed("""<rss><channel><item><title>Show HN: a thing</title>
+      <link>https://example.com/hn</link><pubDate>Mon, 19 Oct 2026 12:00:00 +0000</pubDate>
+      <description>&lt;p&gt;Article URL: &lt;a href="https://x.test/a"&gt;https://x.test/a&lt;/a&gt;&lt;/p&gt;
+      &lt;p&gt;Comments URL: https://news.ycombinator.com/item?id=1&lt;/p&gt;
+      &lt;p&gt;Points: 412&lt;/p&gt;&lt;p&gt;# Comments: 87&lt;/p&gt;</description></item></channel></rss>""", "HN")
+    assert hn[0]["summary"] == "", hn[0]["summary"]
+    assert fresh(hn, set(), now) == []
+    ctx = critic_context(long_items[0], "a stance", 700)
+    assert "led by Jane Roe" in ctx and "fabrication" in ctx and "SPECIFIC 1" in ctx
+    for name, url in sum(SOURCE_SETS.values(), []):
+        assert "hnrss" not in url and "sifted" not in url and "github.blog" not in url, url
 
     # People are matched on the full name only.
     people = [{"name": "Jane Roe", "cares_about": "industrial automation"},
@@ -1296,7 +1345,7 @@ def selftest():
                                      "lanes": ["Founder craft", "Deep tech"]}})
     lane = Lane(t)
     assert lane.enabled and lane.every_hours == 3 and lane.max_chars == 700
-    assert lane.email == "k@example.com" and len(lane.sources) == 7
+    assert lane.email == "k@example.com" and len(lane.sources) == 6
     assert lane.send_hours() == [8, 11, 14, 17, 20], lane.send_hours()
     assert lane.drafts_path.parts[-2:] == ("linkedin", "drafts.jsonl")
     assert not Lane(tenants.Tenant({"id": "x"})).enabled
@@ -1331,6 +1380,7 @@ def selftest():
     br = brief("A Founder", items[0], "Warehouse robots are a sales problem now.", 700,
                taught="HOW THEY HAVE EDITED x", people="PEOPLE IN THIS ITEM y")
     for must in ("Acme raises $40M", "Warehouse robots are a sales problem now.",
+                 "DO NOT REUSE THEIR LINES",
                  "first comment", "700 characters", "HOW THEY HAVE EDITED",
                  "PEOPLE IN THIS ITEM", "three-beat"):
         assert must in br, must
@@ -1468,7 +1518,7 @@ def selftest():
     assert not bl.due(datetime(2026, 10, 20, 9, 5, tzinfo=ZoneInfo("Europe/Berlin")))
     assert bl.due(datetime(2026, 10, 20, 2, 5, tzinfo=ZoneInfo("America/New_York")))
     assert not bl.due(datetime(2026, 10, 20, 3, 5, tzinfo=ZoneInfo("America/New_York")))
-    assert len(bl.sources) == 6
+    assert len(bl.sources) == 7
 
     we = brief("A Founder", items[0], "s", 700, presence_plural=True,
                allowed_constructions=["not-X-it's-Y contrast"])
