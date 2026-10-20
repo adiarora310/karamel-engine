@@ -378,6 +378,7 @@ def selftest():
     with tempfile.TemporaryDirectory() as d:
         t = tenants.Tenant({"id": "li-test", "linkedin": {"enabled": True}})
         lane = linkedin.Lane(t)
+        _orig_dd = type(t).data_dir
         type(t).data_dir = property(lambda self: Path(d))
         recent = datetime.now(timezone.utc).isoformat()
         for urn in ("urn:li:share:111", "urn:li:activity:222"):
@@ -397,7 +398,7 @@ def selftest():
             n = pull(t, today=d1, opener=opener, cfg={"version": "202610"})
         finally:
             load_token = real
-            del type(t).data_dir
+            type(t).data_dir = _orig_dd
         urls = [r.full_url for r in seen]
         assert len(urls) == 2 + 4 + 3 + 6, len(urls)
         assert not any("222" in u for u in urls), "an activity URN must not be queried"

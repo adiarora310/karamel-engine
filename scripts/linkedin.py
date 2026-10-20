@@ -62,6 +62,8 @@ CLI:
   --run ID [--force] [--dry-run]   draft for one tenant now
   --inbox [--dry-run]       one pass over LinkedIn replies
   --enable ID 'JSON'        switch the lane on for a tenant, merging JSON
+  --prepare ID 'JSON'       the same, for someone with no email yet: stored,
+                            and inert until their record can deliver
   --load-agent              write the plists and load the LinkedIn agent
   --person ID "Name" "cares about" ["relationship"]
                             add someone whose interests a draft should use
@@ -127,6 +129,14 @@ SOURCE_SETS = {
         ("IEEE Spectrum Robotics", "https://spectrum.ieee.org/feeds/topic/robotics.rss"),
         ("MIT Technology Review", "https://www.technologyreview.com/feed/"),
         ("Sifted", "https://sifted.eu/feed"),
+    ],
+    "devtools_ai": [
+        ("Hacker News Best", "https://hnrss.org/best"),
+        ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
+        ("Stratechery", "https://stratechery.com/feed/"),
+        ("Sifted", "https://sifted.eu/feed"),
+        ("The Verge", "https://www.theverge.com/rss/index.xml"),
+        ("Crunchbase News", "https://news.crunchbase.com/feed/"),
     ],
     "founders_ai": [
         ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
@@ -202,15 +212,20 @@ class Lane:
         LinkedIn directory."""
         return Path(self.tenant.data_dir) / "people.jsonl"
 
-    def due(self, et):
+    def due(self, now=None):
         """Is this hour one of theirs? Their posting window, every Nth hour of
-        it from the start. Same rule the X lane uses, applied to this lane's
-        own interval, so the two can run at different speeds."""
+        it from the start, on THEIR clock. Same rule as Tenant.due, applied to
+        this lane's own interval, so the two lanes can run at different speeds.
+
+        It read New York time until 2026-10-20, which was right for the first
+        two people and wrong for someone in Berlin: his 08:00 would have been
+        a New York 08:00, the middle of his afternoon."""
         from karamel_common import in_posting_window
-        if not in_posting_window(et, tenant=self.tenant):
+        here = (now or self.tenant.now()).astimezone(self.tenant.tz)
+        if not in_posting_window(here, tenant=self.tenant):
             return False
         start = int((getattr(self.tenant, "posting_window", None) or {}).get("start", 7))
-        return (et.hour - start) % self.every_hours == 0
+        return (here.hour - start) % self.every_hours == 0
 
     def send_hours(self):
         w = getattr(self.tenant, "posting_window", None) or {"start": 7, "end": 21}
@@ -495,12 +510,17 @@ Reply with JSON only:
 
 def brief(author, item, stance, ceiling, people="", taught="", palette="",
           cooling=(), stale_hedges=(), allow_em_dash=False, feedback=None,
-          previous=None, instruction=None):
+          previous=None, instruction=None, presence_plural=False,
+          allowed_constructions=()):
     """The maker's brief for a LinkedIn post. Shares the critic's CLEAN list and
     refused constructions with the X brief, so both are graded on rules they
     were shown."""
-    clean_rules, clean_note = critic.clean_axis("analytical")
-    refused = "\n".join(f"- {l}" for l in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS))
+    allowed = tuple(allowed_constructions or ())
+    clean_rules, clean_note = critic.clean_axis("analytical", allowed)
+    refused = "\n".join(f"- {l}" for l in dict.fromkeys(l for _, l in critic.SLOP_PATTERNS)
+                        if l not in allowed)
+    person = (f'{author} writes as "we": we, us and our, never "I". Keep it that '
+              "way in every sentence.\n" if presence_plural else "")
     aim_lo, aim_hi = max(120, ceiling - 400), max(200, ceiling - 150)
     dash = "" if allow_em_dash else "No em-dashes or en-dashes.\n"
     extra = ""
@@ -542,7 +562,7 @@ WRITTEN FOR LINKEDIN, NOT X:
 - End on the point, a specific question you would really want answered, or an offer that is useful to the reader. Never "Agree?", "Thoughts?" or a request to like or repost.
 - Name the company or person in the item where it matters, so the post stands alone for someone who has not read the news.
 
-HUMAN, NOT GENERATED: say how it landed for them, in their own words for liking, doubting, being surprised or unconvinced, the way the voice card shows they do. Contractions, one aside, their real hedges. Prose with no feeling in it is the main way these read as written by a machine.
+{person}HUMAN, NOT GENERATED: say how it landed for them, in their own words for liking, doubting, being surprised or unconvinced, the way the voice card shows they do. Contractions, one aside, their real hedges. Prose with no feeling in it is the main way these read as written by a machine.
 
 Zero fabrication. State only facts that are in the item above, or that the voice card says they can claim. No invented numbers, quotes or dates. Where a fact you need is missing, leave it out.
 
@@ -607,6 +627,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
     hedges = critic.recent_stance_words(gen_log)
     taught = lessons(lane.edits_path)
     allow = bool(getattr(tenant, "allow_em_dash", False))
+    plural = bool(getattr(tenant, "presence_plural", False))
+    allowed = tuple(getattr(tenant, "allowed_constructions", None) or ())
     palette = palette_line(tenant, lane)
     journey = []
 
@@ -615,7 +637,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
             brief(author, item, stance, lane.max_chars, people=people, taught=taught,
                   palette=palette, cooling=cooling, stale_hedges=hedges,
                   allow_em_dash=allow, feedback=feedback, previous=previous,
-                  instruction=instruction),
+                  instruction=instruction, presence_plural=plural,
+                  allowed_constructions=allowed),
             system=voice, tenant=tenant.id, label="li-maker").strip()
         return out if allow else EM_DASH.sub(", ", out).strip()
 
@@ -627,7 +650,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
                          generated_path=gen_log, max_chars=lane.max_chars,
                          banned_motifs=cooling, palette=palette,
                          require_feeling=bool(getattr(tenant, "require_feeling", False)),
-                         feeling_quota=bool(getattr(tenant, "feeling_quota", False)))
+                         feeling_quota=bool(getattr(tenant, "feeling_quota", False)),
+                         presence_plural=plural, allowed_constructions=allowed)
         veto = linkedin_veto(d) if v.get("verdict") == "PASS" else ""
         if veto:
             v = dict(v, verdict="FAIL", override=veto, fix=veto)
@@ -1014,11 +1038,12 @@ def tick(now=None):
     except Exception as e:
         print(f"linkedin inbox failed: {type(e).__name__}: {e}", file=sys.stderr)
     state = _state()
-    hour_key = et.strftime("%Y-%m-%dT%H")
     done = state.setdefault("drafted_hour", {})
     for t in lanes_with_linkedin():
         lane = Lane(t)
-        if not lane.due(et) or done.get(t.id) == hour_key or is_paused(t):
+        here = t.now()
+        hour_key = here.strftime("%Y-%m-%dT%H")
+        if not lane.due(here) or done.get(t.id) == hour_key or is_paused(t):
             continue
         done[t.id] = hour_key
         _save_state(state)
@@ -1038,7 +1063,7 @@ def tick(now=None):
     return 0
 
 
-def enable(tenant_id, block):
+def enable(tenant_id, block, require_email=True):
     """Turn the lane on for one person by merging `block` into their record.
 
     Validated before it is written: a lane with no sources or nowhere to deliver
@@ -1052,9 +1077,14 @@ def enable(tenant_id, block):
     lane = Lane(fresh_t)
     if not lane.sources:
         raise SystemExit("no sources: pass source_set or sources")
-    if not lane.email:
+    if not lane.email and require_email:
         raise SystemExit("no email: their channel is not email, so pass an email")
     tenants.save_tenant(fresh_t)
+    if not lane.email or not fresh_t.enabled:
+        print(f"{tenant_id}: LinkedIn prepared and inert: it starts when the record "
+              f"has an email channel{'' if fresh_t.enabled else ' and is enabled'}. "
+              f"Hours on their clock ({fresh_t.timezone}): {lane.send_hours()}")
+        return fresh_t
     print(f"{tenant_id}: LinkedIn on, every {lane.every_hours}h at {lane.send_hours()}, "
           f"{len(lane.sources)} sources, delivering to {lane.email}")
     return fresh_t
@@ -1266,6 +1296,7 @@ def selftest():
         t = tenants.Tenant({"id": "loop-test", "name": "A Founder", "voice_card": str(card),
                             "channel": {"type": "email", "address": "k@example.com"},
                             "linkedin": {"enabled": True, "source_set": "founders_ai"}})
+        _orig_dd = type(t).data_dir
         type(t).data_dir = property(lambda self: Path(d))
         try:
             lane = Lane(t)
@@ -1318,7 +1349,7 @@ def selftest():
             rows = read_jsonl(lane.drafts_path)
             assert rows[-1]["draft_text"] == "Third." and rows[-1]["revised_from"] == rows[1]["draft_id"]
         finally:
-            del type(t).data_dir
+            type(t).data_dir = _orig_dd
             g["write"], g["send"] = real_write, real_send
 
     # The palette is built from approvals only, never from past writing, and
@@ -1326,6 +1357,7 @@ def selftest():
     with tempfile.TemporaryDirectory() as d:
         t = tenants.Tenant({"id": "pal-test", "name": "A Founder",
                             "linkedin": {"enabled": True, "source_set": "founders_ai"}})
+        _orig_dd = type(t).data_dir
         type(t).data_dir = property(lambda self: Path(d))
         try:
             lane = Lane(t)
@@ -1335,7 +1367,40 @@ def selftest():
             assert approved_texts(t, lane) == ["A post they confirmed."]
             assert palette_line(t, lane) == "", "one approval is not a palette"
         finally:
-            del type(t).data_dir
+            type(t).data_dir = _orig_dd
+
+    # Their clock, not New York's: 08:05 Berlin is due, 09:05 Berlin is not,
+    # 02:05 New York is 08:05 Berlin and so is due, 03:05 New York is not.
+    from zoneinfo import ZoneInfo
+    berlin = tenants.Tenant({"id": "tz-test", "timezone": "Europe/Berlin",
+                             "posting_window": {"start": 8, "end": 23, "days": "all"},
+                             "linkedin": {"enabled": True, "source_set": "devtools_ai"}})
+    bl = Lane(berlin)
+    assert bl.due(datetime(2026, 10, 20, 8, 5, tzinfo=ZoneInfo("Europe/Berlin")))
+    assert not bl.due(datetime(2026, 10, 20, 9, 5, tzinfo=ZoneInfo("Europe/Berlin")))
+    assert bl.due(datetime(2026, 10, 20, 2, 5, tzinfo=ZoneInfo("America/New_York")))
+    assert not bl.due(datetime(2026, 10, 20, 3, 5, tzinfo=ZoneInfo("America/New_York")))
+    assert len(bl.sources) == 6
+
+    we = brief("A Founder", items[0], "s", 700, presence_plural=True,
+               allowed_constructions=["not-X-it's-Y contrast"])
+    assert 'writes as "we"' in we
+    assert "- not-X-it's-Y contrast" not in we
+    assert 'writes as "we"' not in brief("A Founder", items[0], "s", 700)
+
+    # A lane can be prepared before there is anywhere to send it.
+    with tempfile.TemporaryDirectory() as d:
+        real_dir = tenants.TENANT_DIR
+        tenants.TENANT_DIR = Path(d)
+        try:
+            tenants.save_tenant(tenants.Tenant({"id": "prep-test", "enabled": False,
+                                                "timezone": "Europe/Berlin"}))
+            enable("prep-test", {"source_set": "devtools_ai"}, require_email=False)
+            back = tenants.load_tenant("prep-test")
+            assert Lane(back).enabled and not Lane(back).email and not back.enabled
+            assert "prep-test" not in [t.id for t in lanes_with_linkedin()]
+        finally:
+            tenants.TENANT_DIR = real_dir
 
     # A halt stops the whole agent: no replies read, no drafts written.
     import karamel_common
@@ -1410,6 +1475,11 @@ def main():
                "source": "given by the account holder", "added": now_iso()}
         append_jsonl(Lane(t).people_path, row)
         print(f"{t.id}: will contextualise drafts that mention {row['name']}")
+        return 0
+    if "--prepare" in a:
+        i = a.index("--prepare")
+        enable(a[i + 1], json.loads(a[i + 2]) if len(a) > i + 2 else {},
+               require_email=False)
         return 0
     if "--load-agent" in a:
         return load_agent(tenants.LEGACY_TENANT)
