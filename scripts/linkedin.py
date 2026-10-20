@@ -166,6 +166,17 @@ SOURCE_SETS = {
         ("Nielsen Norman Group", "https://www.nngroup.com/feed/rss/"),
         ("Behavioral Scientist", "https://behavioralscientist.org/feed/"),
     ],
+    # Checked 2026-10-20 for summarised items inside three days. Greater Good,
+    # Inc., TED Ideas, Playbill and BroadwayWorld returned none and are absent.
+    "presence_confidence": [
+        ("Psychology Today", "https://www.psychologytoday.com/us/front/feed"),
+        ("Fast Company Work Life", "https://www.fastcompany.com/work-life/rss"),
+        ("Scientific American", "https://www.scientificamerican.com/platform/syndication/rss/"),
+        ("Big Think", "https://bigthink.com/feed/"),
+        ("Ragan", "https://www.ragan.com/feed/"),
+        ("Knowledge at Wharton", "https://knowledge.wharton.upenn.edu/feed/"),
+        ("MIT Sloan Management Review", "https://sloanreview.mit.edu/feed/"),
+    ],
     "founders_ai": [
         ("TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/"),
         ("TechCrunch Startups", "https://techcrunch.com/category/startups/feed/"),
@@ -238,8 +249,9 @@ class Lane:
         # default leaves Sunday open only from 16:00.
         sched = raw.get("schedule") or None
         if sched:
-            day = str(sched.get("weekday", "sun")).lower()[:3]
-            if day not in WEEKDAYS:
+            day = str(sched.get("weekday", "sun")).lower()
+            day = day if day in ("daily", "weekdays") else day[:3]
+            if day not in WEEKDAYS + ("daily", "weekdays"):
                 raise ValueError(f"tenant {tenant.id!r}: schedule.weekday {day!r}")
             sched = {"weekday": day, "hour": int(sched.get("hour", 9))}
         self.schedule = sched
@@ -256,9 +268,11 @@ class Lane:
         # zones: a stem reaches its inflections ("politic" -> "politics").
         self.banned_zones = [str(z).strip().lower() for z in (raw.get("banned_zones") or [])
                              if str(z).strip()]
-        # A weekly reader can be offered anything from the past week.
+        # A weekly reader can be offered anything from the past week; a daily
+        # one gets the same three days as everyone else.
+        weekly = bool(sched) and sched["weekday"] in WEEKDAYS
         self.max_age_h = int(raw.get("max_age_hours")
-                             or (24 * 7 if sched else ITEM_MAX_AGE_H))
+                             or (24 * 7 if weekly else ITEM_MAX_AGE_H))
         ch = getattr(tenant, "channel", None) or {}
         self.email = raw.get("email") or (ch.get("address") if ch.get("type") == "email" else "")
 
@@ -292,8 +306,10 @@ class Lane:
         from karamel_common import in_posting_window
         here = (now or self.tenant.now()).astimezone(self.tenant.tz)
         if self.schedule:
-            return (WEEKDAYS[here.weekday()] == self.schedule["weekday"]
-                    and here.hour == self.schedule["hour"])
+            day = self.schedule["weekday"]
+            on_day = (day == "daily" or (day == "weekdays" and here.weekday() < 5)
+                      or WEEKDAYS[here.weekday()] == day)
+            return on_day and here.hour == self.schedule["hour"]
         if not in_posting_window(here, tenant=self.tenant):
             return False
         start = int((getattr(self.tenant, "posting_window", None) or {}).get("start", 7))
@@ -707,12 +723,31 @@ def sibling_note(this_week):
             "personal example:\n" + shown)
 
 
+_COMMON = frozenset("""a an and or but of to in on for with at by from it its is was be are
+that this these those i we you me my our your us they them their he she his her what how
+when who which as so if not no can do does just about into than then there here""".split())
+
+
+def _phrases(text):
+    """Three-word phrases with at least one word that carries meaning. "for me
+    personally" counts; "and it is" does not."""
+    w = re.sub(r"[^a-z' ]+", " ", (text or "").lower()).split()
+    return {" ".join(w[i:i + 3]) for i in range(len(w) - 2)
+            if any(x not in _COMMON for x in w[i:i + 3])}
+
+
 def sibling_veto(text, this_week):
     mine = _opening_words(_last_line(text))
     for k, other in enumerate(this_week, 1):
         if mine and mine == _opening_words(_last_line(other)):
             return (f'ends the same way as draft {k} in this email ("{_last_line(other)[:50]}"): '
                     "close on something else")
+    mine_p = _phrases(text)
+    for k, other in enumerate(this_week, 1):
+        shared = sorted(mine_p & _phrases(other))
+        if shared:
+            return (f'"{shared[0]}" is already in draft {k} of this email: a phrase '
+                    "repeated across one email reads as a tic, so say it another way")
     return ""
 
 
@@ -851,6 +886,8 @@ WRITTEN FOR LINKEDIN, NOT X:
 
 DO NOT REUSE THEIR LINES. The voice card quotes their real sentences as the bar, to show the texture. Lifting one, or lightly rewording one, reads as a pastiche of the person and is the most common way these fail. Write new sentences that could sit beside those, never the ones already there.
 
+NO PLANS ON THEIR BEHALF: never announce a launch, hire, new course, programme change or anything they or their organisation "will" or are "excited to start" doing. They have not decided it, and a post would make it public.
+
 THEIR OWN EXPERIENCE: use it only in the general way the voice card describes it ("in my classes", "founders I talk to"). Never invent a specific episode: no named person, no particular class, meeting or day, nothing a specific student or colleague said. A made-up memory in somebody's own name is a fabrication too.
 
 Zero fabrication. State only facts that are in the item above, or that the voice card says they can claim. No invented numbers, quotes or dates. Where a fact you need is missing, leave it out.
@@ -960,6 +997,8 @@ WRITTEN FOR LINKEDIN: short paragraphs with a blank line between them, no bullet
 {we}HUMAN, NOT GENERATED: say why {author} rates this work, in their register as the voice card shows it.
 
 DO NOT REUSE THEIR LINES. The voice card's quoted sentences are the bar, not material.
+
+NO PLANS ON THEIR BEHALF: never announce a launch, hire or new initiative for {author} or anything they run.
 
 LENGTH IS A HARD GATE: {ceiling} characters, counted. One point, made once.
 
@@ -2013,6 +2052,23 @@ def selftest():
                      "<pubDate>Mon, 19 Oct 2026 12:00:00 +0000</pubDate></item></channel></rss>", "S")
     assert amp[0]["link"] == "https://e.com/a?x=1&y=2", amp[0]["link"]
     assert "Never invent a specific episode" in brief("A", items[0], "s", 700)
+    assert "NO PLANS ON THEIR BEHALF" in brief("A", items[0], "s", 700)
+    p1 = "Feedback is half the job.\n\nFor me personally, the follow-up matters more.\n\nHow soon?"
+    p2 = "Corridors cost nothing.\n\nFor me personally, we build it on purpose.\n\nWho does this?"
+    assert '"for me personally" is already in draft 1' in sibling_veto(p2, [p1]), sibling_veto(p2, [p1])
+    assert sibling_veto("Something else entirely.\n\nWhat changed?", [p1]) == ""
+    assert "and it is" not in _phrases("and it is fine")
+    NYc = ZoneInfo("America/New_York")
+    daily = Lane(tenants.Tenant({"id": "d", "linkedin": {"enabled": True,
+                 "schedule": {"weekday": "daily", "hour": 9}}}))
+    assert daily.due(datetime(2026, 10, 24, 9, 5, tzinfo=NYc)), "Saturday counts for daily"
+    assert not daily.due(datetime(2026, 10, 24, 10, 5, tzinfo=NYc))
+    assert daily.max_age_h == ITEM_MAX_AGE_H
+    wkd = Lane(tenants.Tenant({"id": "w", "linkedin": {"enabled": True,
+               "schedule": {"weekday": "weekdays", "hour": 9}}}))
+    assert wkd.due(datetime(2026, 10, 23, 9, 5, tzinfo=NYc)) and not wkd.due(
+        datetime(2026, 10, 24, 9, 5, tzinfo=NYc)), "Friday yes, Saturday no"
+    assert len(SOURCE_SETS["presence_confidence"]) == 7
 
     # A lane can be prepared before there is anywhere to send it.
     with tempfile.TemporaryDirectory() as d:
