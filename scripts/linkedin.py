@@ -368,7 +368,7 @@ def parse_feed(xml_text, source):
             elif name in ("title", "link", "description", "summary", "content",
                           "pubdate", "published", "updated"):
                 fields.setdefault(name, (child.text or "").strip())
-        link = fields.get("link", "")
+        link = html.unescape(fields.get("link", "").strip())
         title = _text(fields.get("title"))
         if not title or not link.startswith(("http://", "https://")):
             continue
@@ -683,6 +683,39 @@ def feeling_veto(text, lane, cooled=()):
     return ""
 
 
+def _last_line(text):
+    lines = [l.strip() for l in (text or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def _opening_words(line, n=3):
+    return " ".join(re.sub(r"[^a-z' ]+", " ", line.lower()).split()[:n])
+
+
+def sibling_note(this_week):
+    """What the drafts already in this email do, so the next one does
+    something else. Each reads fine alone; three that open on the same move,
+    reach for the same kind of example and close on the same question read as
+    one draft written three times, which is the tell."""
+    if not this_week:
+        return ""
+    shown = "\n".join(f'- opens "{t.strip().splitlines()[0][:90]}" ... ends "{_last_line(t)[:90]}"'
+                      for t in this_week)
+    return ("ALREADY IN THIS WEEK'S EMAIL, so this post sits beside these and must "
+            "differ from them: a different opening move, a different ending (not "
+            "the same kind of question or invitation), and not the same kind of "
+            "personal example:\n" + shown)
+
+
+def sibling_veto(text, this_week):
+    mine = _opening_words(_last_line(text))
+    for k, other in enumerate(this_week, 1):
+        if mine and mine == _opening_words(_last_line(other)):
+            return (f'ends the same way as draft {k} in this email ("{_last_line(other)[:50]}"): '
+                    "close on something else")
+    return ""
+
+
 def feeling_note(lane, cooled):
     parts = []
     if lane.require_feeling:
@@ -713,7 +746,7 @@ def _json_out(out):
         return None
 
 
-def pick(voice, author, lane, items, recent_topics, tenant_id=None):
+def pick(voice, author, lane, items, recent_topics, tenant_id=None, lanes_used=()):
     """One call: which item this person would actually have a position on, and
     what the position is. Returns (item, stance, lane_name, why) or None."""
     if not items:
@@ -724,6 +757,9 @@ def pick(voice, author, lane, items, recent_topics, tenant_id=None):
         f"\n    {it['summary'][:280]}" for i, it in enumerate(shown))
     lanes = lane.lanes or ["LinkedIn"]
     avoid = "\n".join(f"- {t}" for t in recent_topics[-8:]) or "- (none yet)"
+    spread = ("Lanes already used in this week's email, so prefer a different one "
+              "where a good item exists: " + ", ".join(lanes_used) + "."
+              if lanes_used else "")
     prompt = f"""You choose what {author} posts about on LinkedIn today. Their voice card is in your system prompt: it says what they know, what they may and may not claim, and what they care about.
 Their space: {lane.space or "as the voice card describes"}.
 
@@ -732,6 +768,7 @@ The position has to stand on this item's own facts plus what the voice card says
 
 Recently posted about, so choose something else:
 {avoid}
+{spread}
 
 Items:
 {listing}
@@ -813,6 +850,8 @@ WRITTEN FOR LINKEDIN, NOT X:
 {person}HUMAN, NOT GENERATED: say how it landed for them, in their own words for liking, doubting, being surprised or unconvinced, the way the voice card shows they do. Contractions, one aside, their real hedges. Prose with no feeling in it is the main way these read as written by a machine.
 
 DO NOT REUSE THEIR LINES. The voice card quotes their real sentences as the bar, to show the texture. Lifting one, or lightly rewording one, reads as a pastiche of the person and is the most common way these fail. Write new sentences that could sit beside those, never the ones already there.
+
+THEIR OWN EXPERIENCE: use it only in the general way the voice card describes it ("in my classes", "founders I talk to"). Never invent a specific episode: no named person, no particular class, meeting or day, nothing a specific student or colleague said. A made-up memory in somebody's own name is a fabrication too.
 
 Zero fabrication. State only facts that are in the item above, or that the voice card says they can claim. No invented numbers, quotes or dates. Where a fact you need is missing, leave it out.
 
@@ -945,7 +984,7 @@ def amplify_context(person, ceiling):
 
 
 def write(tenant, lane, voice, item, stance, people="", previous=None,
-          instruction=None, log=True):
+          instruction=None, log=True, this_week=()):
     """Draft, grade, refine. Returns the critic's result shape plus "final".
 
     An item carrying a "person" is a roster credit and gets that genre's brief
@@ -959,7 +998,12 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
     allow = bool(getattr(tenant, "allow_em_dash", False))
     plural = bool(getattr(tenant, "presence_plural", False))
     cooled = recent_feelings(lane)
+    for t in this_week:
+        cooled |= lane_feelings(t, lane)
     felt = feeling_note(lane, cooled)
+    siblings = sibling_note(this_week)
+    if siblings:
+        felt = f"{felt}\n\n{siblings}" if felt else siblings
     allowed = tuple(getattr(tenant, "allowed_constructions", None) or ())
     palette = palette_line(tenant, lane)
     journey = []
@@ -994,7 +1038,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
                          require_feeling=bool(getattr(tenant, "require_feeling", False)),
                          feeling_quota=bool(getattr(tenant, "feeling_quota", False)),
                          presence_plural=plural, allowed_constructions=allowed)
-        veto = ((linkedin_veto(d) or feeling_veto(d, lane, cooled))
+        veto = ((linkedin_veto(d) or feeling_veto(d, lane, cooled)
+                 or sibling_veto(d, this_week))
                 if v.get("verdict") == "PASS" else "")
         if veto:
             v = dict(v, verdict="FAIL", override=veto, fix=veto)
@@ -1083,12 +1128,14 @@ def send(lane, subj, text, in_reply_to=None):
 ATTEMPTS_PER_SLOT = 2
 
 
-def draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None):
+def draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None,
+              this_week=(), lanes_used=()):
     """Pick, write, gate, up to ATTEMPTS_PER_SLOT items. Returns
     (result, item, stance, lane_name, why, remaining_items, failures)."""
     failures = []
     for _ in range(ATTEMPTS_PER_SLOT):
-        chosen = pick(voice, tenant.name, lane, items, recent, tenant_id=tenant.id)
+        chosen = pick(voice, tenant.name, lane, items, recent, tenant_id=tenant.id,
+                      lanes_used=lanes_used)
         if not chosen:
             break
         item, stance, lane_name, why = chosen
@@ -1096,7 +1143,8 @@ def draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None
         if seen_cb:
             seen_cb(item)
         r = write(tenant, lane, voice, item, stance,
-                  people=people_note(people_in(item, people), tenant.name), log=log)
+                  people=people_note(people_in(item, people), tenant.name), log=log,
+                  this_week=this_week)
         if r["verdict"] == "PASS":
             return r, item, stance, lane_name, why, items, failures
         failures.append((item, stance, r))
@@ -1138,8 +1186,14 @@ def digest_body(author, entries, short=0):
     """One email, every draft numbered, each with its own id and composer link."""
     n = len(entries)
     credits = sum(e["kind"] == "amplify" for e in entries)
-    head = (f"Your LinkedIn drafts for this week, {author.split()[0]}: "
-            f"{credits} crediting people you know, {n - credits} of your own.")
+    words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+    first = author.split()[0]
+    if credits:
+        head = (f"Your LinkedIn drafts for this week, {first}: "
+                f"{words.get(credits, credits)} crediting people you know, "
+                f"{words.get(n - credits, n - credits)} of your own.")
+    else:
+        head = f"Your LinkedIn drafts for this week, {first}: {words.get(n, n)} of your own."
     parts = [head]
     for e in entries:
         item = e["item"]
@@ -1183,7 +1237,8 @@ def run_digest(tenant, lane, voice, dry=False, now=None, fetch=None):
         item = roster_item(person, now)
         stance = (f"you know {person['name']} ({person['relationship'] or 'a colleague'}), "
                   f"and their {person['known_for']} deserves a wider audience")
-        r = write(tenant, lane, voice, item, stance, log=not dry)
+        r = write(tenant, lane, voice, item, stance, log=not dry,
+                  this_week=[e["r"]["final"] for e in entries])
         if r["verdict"] != "PASS":
             _report_failures(tenant.id, [(item, stance, r)])
             continue
@@ -1201,7 +1256,10 @@ def run_digest(tenant, lane, voice, dry=False, now=None, fetch=None):
                 append_jsonl(lane.seen_path, {"link": item["link"], "ts": now_iso()})
         for _ in range(want):
             r, item, stance, lane_name, why, items, failures = draft_one(
-                tenant, lane, voice, items, recent, people, log=not dry, seen_cb=mark_seen)
+                tenant, lane, voice, items, recent, people, log=not dry, seen_cb=mark_seen,
+                this_week=[e["r"]["final"] for e in entries],
+                lanes_used=[e["lane_name"].replace("Your take: ", "") for e in entries
+                            if e["kind"] == "own"])
             _report_failures(tenant.id, failures)
             if r is None:
                 break
@@ -1605,7 +1663,9 @@ def enable(tenant_id, block, require_email=True):
               f"has an email channel{'' if fresh_t.enabled else ' and is enabled'}. "
               f"Hours on their clock ({fresh_t.timezone}): {lane.send_hours()}")
         return fresh_t
-    print(f"{tenant_id}: LinkedIn on, every {lane.every_hours}h at {lane.send_hours()}, "
+    when = (f"weekly {lane.schedule['weekday']} {lane.schedule['hour']:02d}:00"
+            if lane.schedule else f"every {lane.every_hours}h at {lane.send_hours()}")
+    print(f"{tenant_id}: LinkedIn on, {when}, "
           f"{len(lane.sources)} sources, delivering to {lane.email}")
     return fresh_t
 
@@ -1934,6 +1994,26 @@ def selftest():
     assert not both.exclamation_is_feeling, "a refused mark can never also count"
     assert len(SOURCE_SETS["management_comms"]) == 8
 
+    # Variety inside one email.
+    a = "I think feedback is half the job.\n\nIf you run surveys, I'd love to hear how."
+    b = "Corridors cost nothing.\n\nIf you run a section, I'd love to hear how you started."
+    c = "Fear keeps people quiet.\n\nWhat would make you speak up first?"
+    assert sibling_veto(b, [a]).startswith("ends the same way as draft 1"), sibling_veto(b, [a])
+    assert sibling_veto("x\n\nIf you run a team, tell me.", [a]).startswith("ends the same way as draft 1")
+    assert sibling_veto(c, [a, b]) == ""
+    note = sibling_note([a, c])
+    assert "ALREADY IN THIS WEEK'S EMAIL" in note and "Fear keeps people quiet" in note
+    assert sibling_note([]) == ""
+    one = digest_body("Ann Example", [{"kind": "own", "position": 1, "draft_id": 1729350000001,
+                                       "lane_name": "Your take: X", "stance": "s",
+                                       "item": {"title": "T", "source": "S", "link": "https://e.com/a"},
+                                       "r": {"final": "Text."}}])
+    assert one.startswith("Your LinkedIn drafts for this week, Ann: one of your own.")
+    amp = parse_feed("<rss><channel><item><title>T</title><link>https://e.com/a?x=1&amp;amp;y=2</link>"
+                     "<pubDate>Mon, 19 Oct 2026 12:00:00 +0000</pubDate></item></channel></rss>", "S")
+    assert amp[0]["link"] == "https://e.com/a?x=1&y=2", amp[0]["link"]
+    assert "Never invent a specific episode" in brief("A", items[0], "s", 700)
+
     # A lane can be prepared before there is anywhere to send it.
     with tempfile.TemporaryDirectory() as d:
         real_dir = tenants.TENANT_DIR
@@ -2038,7 +2118,7 @@ def selftest():
             text = (f"Revised for {who}." if k.get("previous") else f"A post about {who}.")
             return {"final": text, "verdict": "PASS", "rounds": 0, "scores": {}, "journey": []}
 
-        def fake_draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None):
+        def fake_draft_one(tenant, lane, voice, items, recent, people, log=True, seen_cb=None, **k):
             n_own[0] += 1
             item = {"source": "Feed", "title": f"Story {n_own[0]}", "link": f"https://e.com/{n_own[0]}",
                     "summary": "s" * 200, "published": datetime.now(timezone.utc)}
@@ -2058,7 +2138,7 @@ def selftest():
             subj, body1, _ = sent[0]
             assert subj == "[LinkedIn] Your 3 drafts for this week"
             for must in ("Draft 1 of 3: Crediting Ana Colleague", "Draft 2 of 3: Crediting Ben Colleague",
-                         "Draft 3 of 3: Your take: Founder craft", "2 crediting people you know, 1 of your own",
+                         "Draft 3 of 3: Your take: Founder craft", "two crediting people you know, one of your own",
                          "Reply with the draft's number first", "https://x.test/a"):
                 assert must in body1, must
             assert body1.count("LinkedIn draft #L") == 3
