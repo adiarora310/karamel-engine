@@ -795,7 +795,7 @@ def feelings(draft):
             | reaction_words(draft))
 
 
-def has_feeling(draft):
+def has_feeling(draft, words=(), marks=True):
     """Does the post say how the author felt, not only what happened to them?
 
     A named feeling ("suspicious", "I love it", "unfair"), a reaction in slang
@@ -803,8 +803,14 @@ def has_feeling(draft):
     in reaction position. "Just paid $7" is presence; "Just paid $7 and I'm
     weirdly proud of it" is a feeling."""
     text = draft or ""
-    if (FEELING.search(text) or "!" in text or EMOJI.search(text)
-            or reaction_words(text)):
+    if FEELING.search(text) or reaction_words(text):
+        return True
+    # "!" and emoji count only for people who use them: Thomas's card forbids
+    # both, so for him they must not satisfy the rule they would break.
+    if marks and ("!" in text or EMOJI.search(text)):
+        return True
+    if words and re.search(r"\b(" + "|".join(re.escape(w) for w in words) + r")\b",
+                           text, re.I):
         return True
     # The GoEmotions model, when installed, reads feelings no list names
     # ("I keep going back anyway"). Only an author-side reading counts: see
@@ -869,14 +875,14 @@ def thinks_in_public(draft):
 FEELING_LOOKBACK = 2
 
 
-def recent_feeling(generated_path, lookback=FEELING_LOOKBACK):
+def recent_feeling(generated_path, lookback=FEELING_LOOKBACK, words=(), marks=True):
     """True if any of the last few shipped drafts carried a feeling.
 
     Fewer shipped drafts than the window means no quota yet."""
     finals = shipped_finals(generated_path)
     if len(finals) < lookback:
         return True
-    return any(has_feeling(t) for t in finals[-lookback:])
+    return any(has_feeling(t, words, marks) for t in finals[-lookback:])
 
 
 def recent_public_thinking(generated_path, lookback=PUBLIC_LOOKBACK):
@@ -909,7 +915,8 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
            standalone=True, register=None, emoji_cooling=False,
            must_think=False, banned_stance=(), require_feeling=True,
            must_feel=False, avoid_sentiment=None, presence_plural=False,
-           allowed_constructions=()):
+           allowed_constructions=(), feeling_words=(), feeling_marks=True,
+           feeling_registers=None):
     """Pure. The gate decision, computed in Python not trusted to the model.
     Every axis must clear its threshold. Returns (verdict, override_or_empty).
 
@@ -971,12 +978,14 @@ def decide(scores, draft, allow_em_dash=False, max_chars=None, banned_motifs=(),
                 f"drifting {avoid_sentiment}: recent drafts already leaned that "
                 "way and this person rarely does, so lean the way their palette does"
             )
-    if must_feel and not has_feeling(draft):
+    feel = lambda d: has_feeling(d, feeling_words, feeling_marks)
+    if must_feel and not feel(draft):
         return "FAIL", (
             "the last two posts carried no feeling and neither does this one: "
             "say how it landed, the way their voice card shows they do"
         )
-    if require_feeling and register in FEELING_REGISTERS and not has_feeling(draft):
+    covered = set(feeling_registers) if feeling_registers else FEELING_REGISTERS
+    if require_feeling and register in covered and not feel(draft):
         return "FAIL", (
             "no feeling: he is in the post but never says how it landed. Name "
             "it (annoyed, suspicious, I love it, unfair, smh) or show it"
@@ -1011,7 +1020,8 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
           effort=None, generated_path=None, max_chars=None,
           banned_motifs=None, palette="", require_feeling=True,
           feeling_quota=False, avoid_sentiment=None, brief_note="",
-          presence_plural=False, allowed_constructions=()):
+          presence_plural=False, allowed_constructions=(), feeling_words=(),
+          feeling_marks=True, feeling_registers=None):
     """The gate. One claude call, then a deterministic Python decision. On a
     critic-call failure returns verdict ERROR (never PASS), so an infrastructure
     fault is never read as a clean content FAIL or PASS.
@@ -1058,7 +1068,10 @@ def grade(draft, voice, context=None, register="auto", log=False, author=None,
         must_think=not recent_public_thinking(log_path_for_rules),
         banned_stance=recent_stance_words(log_path_for_rules),
         require_feeling=require_feeling,
-        must_feel=feeling_quota and not recent_feeling(log_path_for_rules),
+        must_feel=feeling_quota and not recent_feeling(
+            log_path_for_rules, words=feeling_words, marks=feeling_marks),
+        feeling_words=feeling_words, feeling_marks=feeling_marks,
+        feeling_registers=feeling_registers,
         avoid_sentiment=avoid_sentiment,
         presence_plural=presence_plural,
         allowed_constructions=allowed_constructions,
@@ -1518,6 +1531,20 @@ def selftest():
     assert slop_hits(reframe) and not slop_hits(reframe, allowed=["not-X-it's-Y contrast"])
     assert "not-X-it's-Y" not in clean_axis("analytical", ["not-X-it's-Y contrast"])[0]
     assert "not-X-it's-Y" in clean_axis("analytical")[0]
+
+    # Per-person feeling rule: own words, marks off, every register.
+    tw = "We shipped the agents first. That makes us optimistic. Realistically."
+    assert not has_feeling("We kept every diff and lost the why.", marks=False)
+    assert has_feeling(tw, words=["optimistic", "realistically"], marks=False)
+    assert has_feeling("Ship it!") and not has_feeling("Ship it!", marks=False)
+    assert decide(clean, "We kept every diff and lost the why.", register="analytical",
+                  require_feeling=True, feeling_registers=["analytical"],
+                  presence_plural=True)[0] == "FAIL"
+    assert decide(clean, tw, register="analytical", require_feeling=True,
+                  feeling_registers=["analytical"], feeling_words=["optimistic"],
+                  feeling_marks=False, presence_plural=True)[0] == "PASS"
+    assert decide(clean, "We kept every diff and lost the why.", register="analytical",
+                  require_feeling=True)[0] == "PASS", "default stays bangers only"
 
     # The Crumbl draft, which shipped because its subject was "That".
     assert slop_hits("Just paid $7 for a Crumbl cookie. That's not a bakery, "

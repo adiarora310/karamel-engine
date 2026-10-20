@@ -152,6 +152,15 @@ DEFAULTS = {
     # refusal and from the critic's CLEAN list for them only.
     "presence_plural": False,
     "allowed_constructions": [],
+    # The feeling rule, per person. feeling_words: their own vocabulary for a
+    # feeling, added to the shared list (Thomas: optimistic, realistically,
+    # fear...). feeling_marks: whether "!" and emoji count as a feeling; off
+    # for anyone whose card forbids them, or the rule would be satisfied by
+    # exactly what they must not write. feeling_registers: which registers
+    # require_feeling covers; empty means bangers only, as for Adi.
+    "feeling_words": [],
+    "feeling_marks": True,
+    "feeling_registers": [],
     "timezone": "America/New_York",
     "originals_per_day": 3,
     "reply_mining": False,   # product default: retired. See effective_reply_mining.
@@ -216,6 +225,9 @@ class Tenant:
         self.engagement_source = src
         self.presence_plural = bool(data.get("presence_plural", False))
         self.allowed_constructions = [str(x) for x in (data.get("allowed_constructions") or [])]
+        self.feeling_words = [str(x).strip().lower() for x in (data.get("feeling_words") or []) if str(x).strip()]
+        self.feeling_marks = bool(data.get("feeling_marks", True))
+        self.feeling_registers = [str(x) for x in (data.get("feeling_registers") or [])]
         raw_max = data.get("max_chars", DEFAULTS["max_chars"])
         self.max_chars = int(raw_max) if raw_max else None
         # Fallback topics for when this tenant's queue is empty. Empty by
@@ -460,6 +472,8 @@ class Tenant:
             "engagement_source": self.engagement_source,
             "presence_plural": self.presence_plural,
             "allowed_constructions": self.allowed_constructions,
+            "feeling_words": self.feeling_words, "feeling_marks": self.feeling_marks,
+            "feeling_registers": self.feeling_registers,
             "allow_em_dash": self.allow_em_dash,
             "seed_topics": self.seed_topics,
             "source": self.source,

@@ -190,6 +190,16 @@ class Lane:
                       or getattr(tenant, "lanes", None)
                       or (getattr(tenant, "_raw", {}) or {}).get("lanes") or [])
                       if str(x).strip()]
+        # Feeling, per person. require_feeling makes a felt reaction a hard
+        # gate rather than guidance; feeling_words are this person's own words
+        # for it, so a voice whose feeling is "optimistic, realistically" is
+        # not graded on someone else's "I love it"; no_exclamation is for a
+        # register that never uses one. Kept in the record, not in code, so
+        # nobody's vocabulary ships in the package.
+        self.require_feeling = bool(raw.get("require_feeling"))
+        self.feeling_words = [str(w).strip().lower() for w in (raw.get("feeling_words") or [])
+                              if str(w).strip()]
+        self.no_exclamation = bool(raw.get("no_exclamation"))
         ch = getattr(tenant, "channel", None) or {}
         self.email = raw.get("email") or (ch.get("address") if ch.get("type") == "email" else "")
 
@@ -453,6 +463,81 @@ def linkedin_veto(draft):
     return ""
 
 
+# --- feeling ------------------------------------------------------------------------
+
+#: Delivered drafts whose feelings are cooling. Every permission this engine has
+#: granted got grabbed and repeated (its own notes, 2026-10-17); the first two
+#: LinkedIn drafts for one pilot both reached for "love".
+FEELING_COOLDOWN = 2
+
+
+def _stem(word):
+    """love, loved and lovely are one feeling said three ways."""
+    return word.lower()[:4]
+
+
+def lane_feelings(text, lane):
+    """The feeling words in a draft: the critic's list and VADER's reaction
+    words, plus this person's own vocabulary for how they feel."""
+    found = set(critic.feelings(text))
+    low = (text or "").lower()
+    for w in lane.feeling_words:
+        if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", low):
+            found.add(w)
+    return found
+
+
+def feels(text, lane):
+    """Whether the draft says how it landed for them.
+
+    Deliberately not critic.has_feeling, which also counts an exclamation mark
+    or an emoji. Those are what a draft reaches for when told to feel
+    something, and for some voices they are exactly what must not appear."""
+    if lane_feelings(text, lane):
+        return True
+    try:
+        return bool(critic._emotion_rescue(text))
+    except Exception:
+        return False
+
+
+def recent_feelings(lane, n=FEELING_COOLDOWN):
+    rows = [r for r in read_jsonl(lane.drafts_path) if r.get("draft_text")][-n:]
+    out = set()
+    for r in rows:
+        out |= lane_feelings(r["draft_text"], lane)
+    return out
+
+
+def feeling_veto(text, lane, cooled=()):
+    """The lane's feeling rules, as one reason or ""."""
+    if lane.no_exclamation and "!" in (text or ""):
+        return "an exclamation mark, which is not in their register"
+    if lane.require_feeling and not feels(text, lane):
+        return ("no feeling: say how this landed for them, in the register the "
+                "voice card describes. An exclamation mark or an emoji does not count")
+    stems = {_stem(w) for w in cooled}
+    again = sorted(w for w in lane_feelings(text, lane) if _stem(w) in stems)
+    if again:
+        return (f'"{again[0]}" again: the last drafts already used that feeling, '
+                "so say how it landed another way")
+    return ""
+
+
+def feeling_note(lane, cooled):
+    parts = []
+    if lane.require_feeling:
+        parts.append("EVERY POST CARRIES A FEELING, and that is checked in code: how "
+                     "this landed for them, in the register their voice card "
+                     "describes. An exclamation mark or an emoji does not count.")
+    if lane.feeling_words:
+        parts.append("Their own words for it include: " + ", ".join(lane.feeling_words) + ".")
+    if cooled:
+        parts.append("The last posts already used these feelings, so not again, "
+                     "in any wording: " + ", ".join(sorted(cooled)) + ".")
+    return "\n".join(parts)
+
+
 # --- the model calls --------------------------------------------------------------
 
 
@@ -511,7 +596,7 @@ Reply with JSON only:
 def brief(author, item, stance, ceiling, people="", taught="", palette="",
           cooling=(), stale_hedges=(), allow_em_dash=False, feedback=None,
           previous=None, instruction=None, presence_plural=False,
-          allowed_constructions=()):
+          allowed_constructions=(), feeling=""):
     """The maker's brief for a LinkedIn post. Shares the critic's CLEAN list and
     refused constructions with the X brief, so both are graded on rules they
     were shown."""
@@ -532,7 +617,7 @@ def brief(author, item, stance, ceiling, people="", taught="", palette="",
                   + ", ".join(f'"{w}"' for w in sorted(stale_hedges)) + ".\n")
     if palette:
         extra += f"\n{palette}\n"
-    for block in (people, taught):
+    for block in (people, taught, feeling):
         if block:
             extra += f"\n{block}\n"
     if previous is not None:
@@ -628,6 +713,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
     taught = lessons(lane.edits_path)
     allow = bool(getattr(tenant, "allow_em_dash", False))
     plural = bool(getattr(tenant, "presence_plural", False))
+    cooled = recent_feelings(lane)
+    felt = feeling_note(lane, cooled)
     allowed = tuple(getattr(tenant, "allowed_constructions", None) or ())
     palette = palette_line(tenant, lane)
     journey = []
@@ -638,7 +725,7 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
                   palette=palette, cooling=cooling, stale_hedges=hedges,
                   allow_em_dash=allow, feedback=feedback, previous=previous,
                   instruction=instruction, presence_plural=plural,
-                  allowed_constructions=allowed),
+                  allowed_constructions=allowed, feeling=felt),
             system=voice, tenant=tenant.id, label="li-maker").strip()
         return out if allow else EM_DASH.sub(", ", out).strip()
 
@@ -652,7 +739,8 @@ def write(tenant, lane, voice, item, stance, people="", previous=None,
                          require_feeling=bool(getattr(tenant, "require_feeling", False)),
                          feeling_quota=bool(getattr(tenant, "feeling_quota", False)),
                          presence_plural=plural, allowed_constructions=allowed)
-        veto = linkedin_veto(d) if v.get("verdict") == "PASS" else ""
+        veto = ((linkedin_veto(d) or feeling_veto(d, lane, cooled))
+                if v.get("verdict") == "PASS" else "")
         if veto:
             v = dict(v, verdict="FAIL", override=veto, fix=veto)
         journey.append({"round": len(journey), "draft": d, "verdict": v["verdict"],
@@ -1401,6 +1489,35 @@ def selftest():
             assert "prep-test" not in [t.id for t in lanes_with_linkedin()]
         finally:
             tenants.TENANT_DIR = real_dir
+
+    # Feeling: "!" and emoji never count, a person's own words do, a required
+    # feeling is a hard gate, and a feeling cools for the next two drafts.
+    with tempfile.TemporaryDirectory() as d:
+        t = tenants.Tenant({"id": "feel-test", "linkedin": {
+            "enabled": True, "source_set": "devtools_ai", "require_feeling": True,
+            "no_exclamation": True, "feeling_words": ["optimistic", "realistically"]}})
+        _orig_dd = type(t).data_dir
+        type(t).data_dir = property(lambda self: Path(d))
+        try:
+            lane = Lane(t)
+            assert not feels("Agents shipped a release today 🎉", lane)
+            assert feels("That makes us optimistic. Realistically, not yet.", lane)
+            assert "exclamation" in feeling_veto("We love this!", lane)
+            assert feeling_veto("Agents shipped a release today.", lane).startswith("no feeling")
+            assert feeling_veto("That makes us optimistic, with a condition.", lane) == ""
+            append_jsonl(lane.drafts_path, {"draft_text": "We loved reading that."})
+            cooled = recent_feelings(lane)
+            assert "loved" in cooled
+            assert '"love" again' in feeling_veto("We love the honesty here.", lane, cooled)
+            assert feeling_veto("We were suspicious at first, and still optimistic.",
+                                lane, cooled) == ""
+            note = feeling_note(lane, cooled)
+            assert "EVERY POST CARRIES A FEELING" in note and "optimistic" in note
+            assert "loved" in note
+            off = Lane(tenants.Tenant({"id": "off", "linkedin": {"enabled": True}}))
+            assert feeling_veto("A plain sentence.", off) == ""
+        finally:
+            type(t).data_dir = _orig_dd
 
     # A halt stops the whole agent: no replies read, no drafts written.
     import karamel_common

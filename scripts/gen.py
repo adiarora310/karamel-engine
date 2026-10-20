@@ -203,7 +203,8 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
                        allow_em_dash=False, max_chars=None, banned_motifs=(),
                        owe_thinking=False, banned_stance=(), palette="",
                        require_feeling=True, owe_feeling=False, context=None,
-                       presence_plural=False, allowed_constructions=()):
+                       presence_plural=False, allowed_constructions=(),
+                       feeling_everywhere=False, feeling_marks=True):
     """The maker's brief.
 
     It used to state one CLEAN rule ("no throat-clearing") while the critic
@@ -275,6 +276,14 @@ def build_draft_prompt(voice, topic, register, feedback=None, author=None,
             "start there and say so. Nothing is gained by hiding where the thought "
             "came from."
         )
+    if feeling_everywhere and register not in critic.PRESENCE_REGISTERS:
+        presence_rule += (
+            "\n\nSAY HOW IT LANDED, checked in code: every post from this person "
+            "carries a feeling, in the register their voice card describes. A "
+            "clever reframe or a true fact alone is not a feeling.")
+    if not feeling_marks:
+        presence_rule += ("\nExclamation marks and emoji never count as the "
+                          "feeling for this person, and they never use them.")
     cooldown = ""
     if banned_motifs:
         names = ", ".join(sorted(banned_motifs)[:12])
@@ -358,7 +367,8 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                allow_em_dash=False, tenant=None, max_chars=None,
                banned_motifs=(), owe_thinking=False, banned_stance=(),
                palette="", require_feeling=True, owe_feeling=False,
-               context=None, presence_plural=False, allowed_constructions=()):
+               context=None, presence_plural=False, allowed_constructions=(),
+               feeling_everywhere=False, feeling_marks=True):
     """The maker. One claude call, em-dash scrubbed unless the tenant uses them.
     The scrub was unconditional and silent: it rewrote em dashes to commas on
     the way out, so a tenant whose voice includes them could never receive a
@@ -372,7 +382,9 @@ def draft_post(voice, topic, register, feedback=None, author=None,
                            require_feeling=require_feeling,
                            owe_feeling=owe_feeling, context=context,
                            presence_plural=presence_plural,
-                           allowed_constructions=allowed_constructions),
+                           allowed_constructions=allowed_constructions,
+                           feeling_everywhere=feeling_everywhere,
+                           feeling_marks=feeling_marks),
         system=voice, label="maker", tenant=tenant,
     )
     out = out.strip()
@@ -384,7 +396,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                    critiques_path=None, allow_em_dash=False, tenant=None,
                    max_chars=None, samples_path=None, require_feeling=True,
                    feeling_quota=False, lanes=(), research=True, edits_path=None,
-                   presence_plural=False, allowed_constructions=()):
+                   presence_plural=False, allowed_constructions=(),
+                   feeling_words=(), feeling_marks=True, feeling_registers=None):
     """Generate, critique, refine, ship only a PASS. Records the journey so the
     catch-and-rewrite is visible. If seed is given it is the round-0 draft (used
     to demonstrate rescuing a known-flat draft).
@@ -419,7 +432,10 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
         pal = (pal + f" Their last drafts have leaned {avoid}, which is rare for "
                f"them: this one must not lead {avoid}. Checked in code.").strip()
     stale_hedges = critic.recent_stance_words(log_for_rules)
-    owe_feeling = feeling_quota and not critic.recent_feeling(log_for_rules)
+    owe_feeling = feeling_quota and not critic.recent_feeling(
+        log_for_rules, words=feeling_words, marks=feeling_marks)
+    feeling_everywhere = bool(require_feeling and feeling_registers
+                              and register in feeling_registers)
     # Once per topic, before any round: every round argues the same stance
     # from the same facts, and the critic grades against them too.
     ctx = (topic_context(voice, topic, author or "them", tenant=tenant, lanes=lanes)
@@ -441,7 +457,9 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                           require_feeling=require_feeling,
                           owe_feeling=owe_feeling, context=ctx,
                           presence_plural=presence_plural,
-                          allowed_constructions=allowed_constructions)
+                          allowed_constructions=allowed_constructions,
+                          feeling_everywhere=feeling_everywhere,
+                          feeling_marks=feeling_marks)
 
     def graded(d):
         v = critic.grade(d, voice, register=register, author=author,
@@ -452,6 +470,8 @@ def generate_gated(voice, topic, register="analytical", max_rounds=2, seed=None,
                          brief_note=context_block(ctx),
                          presence_plural=presence_plural,
                          allowed_constructions=allowed_constructions,
+                         feeling_words=feeling_words, feeling_marks=feeling_marks,
+                         feeling_registers=feeling_registers,
                          critiques_path=critiques_path,
                          allow_em_dash=allow_em_dash, tenant=tenant)
         journey.append({
@@ -584,7 +604,8 @@ def selftest():
                 allow_em_dash=False, tenant=None, max_chars=None,
                 banned_motifs=(), owe_thinking=False, banned_stance=(),
                 palette="", require_feeling=True, owe_feeling=False,
-                context=None, presence_plural=False, allowed_constructions=()):
+                context=None, presence_plural=False, allowed_constructions=(),
+                feeling_everywhere=False, feeling_marks=True):
         seq["n"] += 1
         seq.setdefault("ceilings", []).append(max_chars)
         seq["authors"].append(author)
@@ -596,7 +617,8 @@ def selftest():
                    tenant=None, max_chars=None, generated_path=None,
                    banned_motifs=None, palette="", require_feeling=True,
                    feeling_quota=False, avoid_sentiment=None, brief_note="",
-                   presence_plural=False, allowed_constructions=()):
+                   presence_plural=False, allowed_constructions=(),
+                   feeling_words=(), feeling_marks=True, feeling_registers=None):
         seq["authors"].append(author)
         seq.setdefault("tenants", []).append(tenant)
         seq["paths"].append(critiques_path)
@@ -658,6 +680,11 @@ def selftest():
     assert "we, us, our count" in we and "(I, my, me)" not in we
     assert "- not-X-it's-Y contrast" not in we
     assert "- not-X-it's-Y contrast" in build_draft_prompt("v", "t", "banger")
+    allfeel = build_draft_prompt("v", "t", "analytical", feeling_everywhere=True,
+                                 feeling_marks=False)
+    assert "every post from this person carries a feeling" in allfeel
+    assert "never count as the feeling" in allfeel
+    assert "every post from this person" not in build_draft_prompt("v", "t", "analytical")
     owed = build_draft_prompt("v", "t", "analytical", owe_feeling=True)
     assert "CARRIED NO FEELING" in owed and "CARRIED NO FEELING" not in a
     assert "PUT YOURSELF IN THE POST" not in a
@@ -746,6 +773,9 @@ def main():
             presence_plural=tenant.presence_plural if tenant else False,
             allowed_constructions=tenant.allowed_constructions if tenant else (),
             lanes=tenant.lanes if tenant else (),
+            feeling_words=tenant.feeling_words if tenant else (),
+            feeling_marks=tenant.feeling_marks if tenant else True,
+            feeling_registers=tenant.feeling_registers if tenant else None,
             allow_em_dash=(tenant.allow_em_dash if tenant
                            else "--allow-em-dash" in sys.argv))
     except llm.LLMError as e:
