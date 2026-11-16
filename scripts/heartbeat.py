@@ -41,6 +41,7 @@ import llm
 import tenants
 from karamel_common import append_jsonl, is_paused, now_iso, read_jsonl
 from shared import post_url
+from linkedin import site_delivers
 
 # Seeds are evergreen and voice-neutral by design: they exist so the loop always
 # has something to chew on, not to be good posts. A tenant with real topics in
@@ -417,7 +418,12 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
         # useful thing is what this is about, and the whole topic never fits.
         lane = classify_lane(t["topic"], r["final"], tenant)
         subject = subject_for("Draft ready to post", lane)
-        mid = channels.send(tenant, msg, dry=dry, subject=subject)
+        # A person whose drafts trykaramel.com delivers gets no email from this
+        # machine: the site bridge reads the row written below and puts the
+        # draft in their Karamel account, in the same email as their LinkedIn
+        # drafts. Same switch as the LinkedIn lane (linkedin.site_delivers).
+        on_site = site_delivers(tenant.id)
+        mid = None if on_site else channels.send(tenant, msg, dry=dry, subject=subject)
         delivered += 1
         if dry:
             continue
@@ -440,6 +446,7 @@ def run_tenant(tenant, limit=None, force=False, dry=False):
             # necessarily Telegram's.
             "telegram_msg_id": mid,
             "lane": lane,
+            "delivery": "site" if on_site else "email",
             "drafted_at": now_iso(),
         })
     print(f"[{tenant.id}] done: {delivered} draft(s) delivered")
