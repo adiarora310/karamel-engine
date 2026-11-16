@@ -135,6 +135,52 @@ def auth_failure_hint(cfg, err):
     return "\n  ".join(lines)
 
 
+#: The bridge's config. With "relay_mail": true in it, every email this engine
+#: sends goes out through trykaramel.com, from Karamel's own address, and none
+#: from the mailbox in email.json.
+SITE_BRIDGE_CFG = CONFIG_DIR / "site_bridge.json"
+
+
+def site_relay(path=None):
+    """The site to send mail through, as {"base", "key"}, or None.
+
+    Read fresh on every send and never raises: a missing or malformed file, or
+    one without "relay_mail", means mail goes out the way it always has."""
+    try:
+        cfg = json.loads((path or SITE_BRIDGE_CFG).read_text())
+        if cfg.get("relay_mail") is True and cfg.get("base") and cfg.get("key"):
+            return {"base": str(cfg["base"]).rstrip("/"), "key": str(cfg["key"])}
+    except Exception:
+        pass
+    return None
+
+
+def relay_email(relay, to, text, subject=None):
+    """Hand one email to the site to send. Returns a message id.
+
+    When the relay is on there is no falling back to the mailbox: a failure is
+    raised, because the point of the relay is that nothing leaves from a
+    personal address. The id is made here; replies go to Karamel's address and
+    are not read by inbox.py, so nothing threads on it."""
+    import urllib.error
+    import urllib.request
+    from email.utils import make_msgid
+
+    req = urllib.request.Request(
+        relay["base"] + "/api/ask?engine=mail",
+        data=json.dumps({"to": to, "subject": subject or "[Karamel] a draft for you", "text": text}).encode(),
+        headers={"Authorization": "Bearer " + relay["key"], "Content-Type": "application/json",
+                 "User-Agent": "karamel-engine"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=40) as r:
+            out = json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"the site refused to send mail to {to!r}: {e.code} {e.read().decode()[:160]}") from e
+    if not out.get("ok"):
+        raise RuntimeError(f"the site did not send mail to {to!r}: {out}")
+    return make_msgid(domain="trykaramel.com")
+
+
 def send_email(tenant, text, subject=None, in_reply_to=None):
     """Deliver one draft by email. Returns the Message-ID.
 
@@ -152,10 +198,13 @@ def send_email(tenant, text, subject=None, in_reply_to=None):
     from email.message import EmailMessage
     from email.utils import make_msgid
 
-    cfg = load_email_creds()
     to = (tenant.channel or {}).get("address")
     if not to:
         raise ValueError(f"tenant {tenant.id!r} has an email channel with no address")
+    relay = site_relay()
+    if relay:
+        return relay_email(relay, to, text, subject=subject)
+    cfg = load_email_creds()
 
     msg = EmailMessage()
     msg["Subject"] = subject or "[Karamel] a draft for you"
@@ -274,6 +323,18 @@ def send(tenant, text, dry=False, subject=None, in_reply_to=None):
 
 
 def selftest():
+    # The relay switch: off unless the bridge config says so, and never raises.
+    import tempfile
+    from pathlib import Path as _P
+    with tempfile.TemporaryDirectory() as _d:
+        _f = _P(_d) / "site_bridge.json"
+        assert site_relay(_f) is None
+        _f.write_text("not json")
+        assert site_relay(_f) is None
+        _f.write_text(json.dumps({"base": "https://x.test/", "key": "k"}))
+        assert site_relay(_f) is None
+        _f.write_text(json.dumps({"base": "https://x.test/", "key": "k", "relay_mail": True}))
+        assert site_relay(_f) == {"base": "https://x.test", "key": "k"}
 
     # Google app passwords, pasted as displayed. Four groups of four is what is
     # on the screen, so it is what people paste, and Gmail answers 535 for it.
