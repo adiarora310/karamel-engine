@@ -93,6 +93,23 @@ import critic
 import tenants
 from shared import CONFIG_DIR, append_jsonl, now_iso, read_jsonl, write_jsonl_atomic
 
+#: Written by the site bridge's installer, read here. {"deliver": {tenant_id: email}}.
+SITE_BRIDGE_CFG = CONFIG_DIR / "site_bridge.json"
+
+
+def site_delivers(tenant_id, path=None):
+    """True when trykaramel.com delivers this person's drafts (see Lane.delivery).
+
+    Read fresh each time and never raises: a missing, unreadable or malformed
+    file means nobody is on that path, which is the behaviour from before the
+    site existed."""
+    try:
+        cfg = json.loads(Path(path or SITE_BRIDGE_CFG).read_text())
+        return str(tenant_id) in (cfg.get("deliver") or {})
+    except Exception:
+        return False
+
+
 # --- the numbers ---------------------------------------------------------------
 
 #: Short and tight, and still a LinkedIn post. The feed shows roughly the first
@@ -278,6 +295,17 @@ class Lane:
                              or (24 * 7 if weekly else ITEM_MAX_AGE_H))
         ch = getattr(tenant, "channel", None) or {}
         self.email = raw.get("email") or (ch.get("address") if ch.get("type") == "email" else "")
+        # Who puts a finished draft in front of this person. "email" is this
+        # machine sending it. "site" means trykaramel.com does: the site bridge
+        # reads each new row off their drafts log, the site saves it to their
+        # account and sends one email of its own with a link to the editor. A
+        # person is on that path when the bridge's own config lists them under
+        # "deliver", so there is one place that says so and the two halves
+        # cannot disagree: listed means the site emails and this machine does
+        # not, unlisted means the reverse. Never both, never neither. A record
+        # can still say "delivery" outright, which wins.
+        self.delivery = str(raw.get("delivery")
+                            or ("site" if site_delivers(tenant.id) else "email")).lower()
 
     @property
     def dir(self):
@@ -1153,6 +1181,10 @@ LinkedIn draft #L{draft_id}
 def send(lane, subj, text, in_reply_to=None):
     """Send one LinkedIn email through channels.send_email. Returns the Message-ID.
 
+    A lane the site delivers for sends nothing from here and returns None: the
+    draft is still drafted, graded and recorded exactly as before, and the row
+    simply has no message id. The site's email is the only one they get.
+
     Always email, whatever the person's X drafts arrive by, because these are
     asked for as separate emails. Addressed through a stand-in that carries
     only the lane's address, so a lane can deliver somewhere other than the
@@ -1160,6 +1192,8 @@ def send(lane, subj, text, in_reply_to=None):
     credentials and self-addressed-unread fix."""
     import types
     import channels
+    if getattr(lane, "delivery", "email") == "site":
+        return None
     if not lane.email:
         raise ValueError(f"tenant {lane.tenant.id!r} has no email for the LinkedIn lane")
     to = types.SimpleNamespace(id=lane.tenant.id,
@@ -1859,6 +1893,30 @@ def selftest():
     assert not Lane(tenants.Tenant({"id": "x"})).enabled
     off = tenants.Tenant({"id": "y", "linkedin": {"enabled": False}})
     assert not Lane(off).enabled
+
+    # Delivery: this machine emails unless the site does, and never both.
+    import tempfile
+    assert lane.delivery == "email"
+    with tempfile.TemporaryDirectory() as d:
+        cfgp = Path(d) / "site_bridge.json"
+        assert not site_delivers("lane-test", cfgp), "no file means nobody is on the site path"
+        cfgp.write_text("{not json")
+        assert not site_delivers("lane-test", cfgp), "a broken file means nobody is on the site path"
+        cfgp.write_text(json.dumps({"deliver": {"lane-test": "k@example.com"}}))
+        assert site_delivers("lane-test", cfgp) and not site_delivers("someone-else", cfgp)
+    by_record = Lane(tenants.Tenant({"id": "lane-test", "name": "A Founder",
+                                     "channel": {"type": "email", "address": "k@example.com"},
+                                     "linkedin": {"enabled": True, "delivery": "site"}}))
+    assert by_record.delivery == "site"
+    import channels as _ch
+    real_send, sent_from_here = _ch.send_email, []
+    _ch.send_email = lambda *a, **k: sent_from_here.append(a) or "<mid@test>"
+    try:
+        assert send(by_record, "subject", "body") is None and not sent_from_here, \
+            "a lane the site delivers for sends no email from this machine"
+        assert send(lane, "subject", "body") == "<mid@test>" and len(sent_from_here) == 1
+    finally:
+        _ch.send_email = real_send
 
     # The composer link carries the text and posts nothing by itself.
     u = compose_url("LOIs & customers")
