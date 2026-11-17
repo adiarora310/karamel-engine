@@ -286,6 +286,17 @@ def check_playwright():
     return Check("playwright", True, "installed")
 
 
+def dead_agents(rows):
+    """(label, code) for agents that exited badly and are not running now.
+
+    launchctl prints PID, last exit status, label. A kept-alive agent that was
+    restarted (an update sends it SIGTERM) keeps -15 as its last status while
+    the new process runs, and reporting that as a failure was a daily false
+    alarm. A row with a PID is alive; only a dead one with a bad status counts."""
+    return [(c[-1], c[1]) for c in rows
+            if len(c) >= 3 and c[0] == "-" and c[1] not in ("0", "-")]
+
+
 def check_agents():
     try:
         r = subprocess.run(["launchctl", "list"], capture_output=True, text=True,
@@ -301,7 +312,7 @@ def check_agents():
                          f"{len(agent_plists())} plist(s) present, none loaded",
                          "./karamel start")
         return Check("agents", False, "nothing installed", "./karamel start")
-    bad = [(c[-1], c[1]) for c in rows if len(c) >= 3 and c[1] not in ("0", "-")]
+    bad = dead_agents(rows)
     if bad:
         detail = ", ".join(f"{lbl} exited {code}" for lbl, code in bad)
         return Check("agents", False, f"{len(rows)} loaded, {detail}",
@@ -561,6 +572,46 @@ def build_alert(failures, stderr_by_log, support=None):
 MAX_REPORT_CHARS = 12000
 
 
+def report_stderr(state, hours=24):
+    """Error-log text written since the last daily report, by file.
+
+    The report used to print the last 20 lines of every .err, undated, so a
+    permission warning from September sat next to this morning's lines and
+    every day read as broken. Offsets, like the watchdog's, kept under their
+    own key so the two never eat each other's news. On the first run there is
+    no offset yet: a file untouched within the window is treated as read."""
+    found, offsets = {}, dict(state.get("report_offsets") or {})
+    first, cutoff = "report_offsets" not in state, time.time() - hours * 3600
+    for p in err_logs():
+        st = p.stat()
+        prev = offsets.get(p.name)
+        if prev is None:
+            prev = st.st_size if first and st.st_mtime < cutoff else 0
+            if first and st.st_mtime >= cutoff:
+                prev = max(0, st.st_size - 4000)
+        if st.st_size < prev:
+            prev = 0
+        if st.st_size > prev:
+            with open(p, "r", errors="replace") as f:
+                f.seek(prev)
+                chunk = benign(f.read())
+            if chunk:
+                found[p.name] = chunk
+        offsets[p.name] = st.st_size
+    return found, offsets
+
+
+def squash(lines):
+    """Consecutive identical lines folded into one with a count."""
+    out = []
+    for line in lines:
+        if out and out[-1][0] == line:
+            out[-1][1] += 1
+        else:
+            out.append([line, 1])
+    return [l if n == 1 else f"{l}  (x{n})" for l, n in out]
+
+
 def _rows_since(path, hours=24):
     """JSONL rows stamped within the window. Unstampable rows are counted.
 
@@ -596,7 +647,7 @@ def _rows_since(path, hours=24):
     return out
 
 
-def build_daily_report(checks, hours=24):
+def build_daily_report(checks, hours=24, fresh=None):
     """What the operator gets every day, working or not.
 
     The watchdog only speaks when a check fails, and then sends six lines of
@@ -607,7 +658,8 @@ def build_daily_report(checks, hours=24):
     while originals flowed, a queue quietly running dry.
 
     So this is unconditional, carries counts rather than verdicts, and includes
-    the tail of every non-empty error log whether or not a check noticed it."""
+    what every error log gained since the last report (`fresh`, from
+    report_stderr), whether or not a check noticed it."""
     import tenants
 
     t = tenants.load_tenant(_owner())
@@ -648,23 +700,26 @@ def build_daily_report(checks, hours=24):
         rows = [l.split() for l in r.stdout.splitlines() if is_agent_line(l)]
         if rows:
             for row in rows:
-                L.append(f"  {row[-1]:32} exit={row[1]}")
+                state = ("running" if row[0] != "-" else
+                         "idle, last run ok" if row[1] in ("0", "-") else
+                         f"NOT RUNNING, exited {row[1]}")
+                L.append(f"  {row[-1]:32} {state}")
         else:
             L.append("  none loaded")
     except (OSError, subprocess.TimeoutExpired) as e:
         L.append(f"  could not read launchctl: {e}")
 
-    # Every non-empty error log, not only the ones a check flagged. The point of
-    # this report is the things no check knows to look for.
-    logs = [p for p in err_logs() if p.stat().st_size]
+    # Everything the error logs gained since the last report, not only what a
+    # check flagged. The point of this report is the things no check knows to
+    # look for, but only the new ones: old lines are not news.
+    fresh = fresh or {}
     L.append("")
-    L.append("Error logs" if logs else "Error logs: all empty")
-    for p in logs:
-        tail = p.read_text(errors="replace").strip().splitlines()[-20:]
-        if not tail:
-            continue
+    L.append(f"New in the error logs since the last report" if fresh
+             else "Error logs: nothing new since the last report")
+    for name in sorted(fresh):
+        tail = squash(fresh[name].strip().splitlines())[-20:]
         L.append("")
-        L.append(f"  {p.name}:")
+        L.append(f"  {name}:")
         L.extend(f"    {line[:200]}" for line in tail)
 
     return "\n".join(L)[:MAX_REPORT_CHARS]
@@ -695,7 +750,9 @@ def send_daily_report(dry=False, first_run=False):
     if t is None:
         print(f"no tenant {_owner()!r}", file=sys.stderr)
         return 1
-    body = build_daily_report(run_checks(deep=False))
+    state = load_state()
+    fresh, offsets = report_stderr(state)
+    body = build_daily_report(run_checks(deep=False), fresh=fresh)
     if dry:
         print(body)
         return 0
@@ -712,6 +769,11 @@ def send_daily_report(dry=False, first_run=False):
         print(f"could not send the daily report to {support}: {e}",
               file=sys.stderr)
         return 1
+    # Only once it has gone out: a report that failed to send must not swallow
+    # the lines it was carrying. Reloaded so the watchdog's own keys survive.
+    state = load_state()
+    state["report_offsets"] = offsets
+    save_state(state)
     print(f"daily report sent to {support}")
     return 0
 
@@ -894,6 +956,17 @@ def selftest():
     none = build_alert([Check("a", False, "x", "")], {})
     assert "Nothing you can run" in none, none
 
+    # A restarted agent that is running again is not a failure (the daily
+    # "dashboard exited -15" false alarm); a dead one with a bad status is.
+    assert dead_agents([["12997", "-15", "com.karamel.dashboard"],
+                        ["-", "0", "com.karamel.doctor"]]) == []
+    assert dead_agents([["-", "1", "com.karamel.inbox"]]) == [("com.karamel.inbox", "1")]
+    assert squash(["a", "a", "a", "b"]) == ["a  (x3)", "b"]
+    quiet = build_daily_report([], fresh={})
+    assert "nothing new since the last report" in quiet, quiet
+    loud = build_daily_report([], fresh={"inbox.err": "boom\nboom"})
+    assert "inbox.err:" in loud and "boom  (x2)" in loud, loud
+
     # A shrunken log was rotated or truncated, and must be re-read from zero
     # rather than reported as "nothing new" forever after.
     import tempfile
@@ -920,6 +993,18 @@ def selftest():
             p.write_text("x\n\n   \n")
             found4, _ = new_stderr({"offsets": {"t.err": 2}})
             assert found4 == {}, found4
+
+            # The daily report: an old log on the first run is not news, a line
+            # added after the last report is, and nothing is told twice.
+            p.write_text("old\n")
+            os.utime(p, (time.time() - 3 * 86400,) * 2)
+            first, roffs = report_stderr({})
+            assert first == {}, first
+            with open(p, "a") as f:
+                f.write("new\n")
+            again, roffs2 = report_stderr({"report_offsets": roffs})
+            assert again == {"t.err": "new"}, again
+            assert report_stderr({"report_offsets": roffs2})[0] == {}
         finally:
             globals()["err_logs"] = real_glob
     print("selftest: all assertions passed")
