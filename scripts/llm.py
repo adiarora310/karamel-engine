@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from shared import CONFIG_DIR, append_jsonl, now_iso
@@ -70,6 +71,11 @@ CLI_CANDIDATES = (
     "~/.local/bin/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
 )
 CLI_TIMEOUT = 300
+# A failed `claude -p` is tried again: after 20 seconds, then after a minute. The CLI's own service sometimes refuses
+# a call for a moment (on 16 and 17 Nov 2026 it rejected its own default model at noon, and two people got no draft
+# because each slot was tried once). If the refusal names the model, the last try asks for a named one instead.
+CLI_RETRY_WAITS = (20, 60)
+CLI_FALLBACK_MODEL = "opus"
 
 DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MAX_TOKENS = 16000        # thinking + text share this ceiling on Opus 5
@@ -251,22 +257,29 @@ def _complete_cli(prompt, system, cfg, tenant, label, tools=None):
     # Code, and an inherited session variable makes the child behave as part of
     # the parent's session rather than as a fresh headless call.
     env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
-    try:
-        argv = [claude_bin(cfg), "-p", full]
-        if tools:
-            # Headless -p denies any tool that would ask permission, so the
-            # ones a call needs are named here and nothing else is allowed.
-            argv += ["--allowedTools", ",".join(tools)]
-        r = subprocess.run(
-            argv, capture_output=True, text=True,
-            timeout=CLI_TIMEOUT * (3 if tools else 1), cwd="/tmp", env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise LLMError(f"claude -p timed out after {CLI_TIMEOUT}s") from e
-    except OSError as e:
-        raise LLMError(f"could not run the Claude CLI: {e}") from e
-
-    if r.returncode != 0:
+    argv = [claude_bin(cfg), "-p", full]
+    if tools:
+        # Headless -p denies any tool that would ask permission, so the
+        # ones a call needs are named here and nothing else is allowed.
+        argv += ["--allowedTools", ",".join(tools)]
+    fallback = (cfg or {}).get("cli_fallback_model", CLI_FALLBACK_MODEL)
+    detail, r = "", None
+    for attempt, wait in enumerate((0,) + CLI_RETRY_WAITS):
+        if wait:
+            time.sleep(wait)
+        last = attempt == len(CLI_RETRY_WAITS)
+        cmd = argv + ["--model", fallback] if (last and fallback and "model" in detail.lower()) else argv
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=CLI_TIMEOUT * (3 if tools else 1), cwd="/tmp", env=env,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise LLMError(f"claude -p timed out after {CLI_TIMEOUT}s") from e
+        except OSError as e:
+            raise LLMError(f"could not run the Claude CLI: {e}") from e
+        if r.returncode == 0:
+            break
         # The CLI reports its own failures on STDOUT, not stderr. Reading only
         # stderr produced "claude -p failed: " with nothing after it, and made
         # a logged-out session undiagnosable for weeks.
@@ -279,7 +292,10 @@ def _complete_cli(prompt, system, cfg, tenant, label, tools=None):
                 "Run `claude` once and sign in. This is the failure mode of the "
                 "cli provider: sessions expire, and nothing else announces it."
             )
-        raise LLMError(f"claude -p failed: {detail[:300]}")
+        if last:
+            raise LLMError(f"claude -p failed: {detail[:300]}")
+        # Said on stdout, so a call that recovers doesn't show up as an error in the daily report.
+        print(f"[llm] claude -p refused ({detail[:120]}); trying again in {CLI_RETRY_WAITS[attempt]}s")
 
     out = r.stdout.strip()
     record(tenant, "claude-code-cli", _CliUsage(), label)
